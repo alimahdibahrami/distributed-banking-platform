@@ -1,0 +1,142 @@
+# Separate Compose project: does not touch Assignment 1 (mini-banking).
+name: distributed-banking
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: distributed-banking-platform:local
+  init: true
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=16m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+    interval: 15s
+    timeout: 3s
+    retries: 3
+    start_period: 10s
+
+services:
+  shard_a_db:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    restart: "no"
+    environment:
+      POSTGRES_DB: bank_a
+      POSTGRES_USER: bank
+      POSTGRES_PASSWORD: ${SHARD_A_DB_PASSWORD:?Set SHARD_A_DB_PASSWORD in .env}
+    volumes:
+      - shard_a_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank -d bank_a"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  shard_b_db:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    restart: "no"
+    environment:
+      POSTGRES_DB: bank_b
+      POSTGRES_USER: bank
+      POSTGRES_PASSWORD: ${SHARD_B_DB_PASSWORD:?Set SHARD_B_DB_PASSWORD in .env}
+    volumes:
+      - shard_b_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank -d bank_b"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  bank_a1:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.shard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: A
+      REPLICA_ID: A1
+      BANK_DB_HOST: shard_a_db
+      BANK_DB_NAME: bank_a
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${SHARD_A_DB_PASSWORD:?Set SHARD_A_DB_PASSWORD in .env}
+    depends_on:
+      shard_a_db:
+        condition: service_healthy
+
+  bank_a2:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.shard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: A
+      REPLICA_ID: A2
+      BANK_DB_HOST: shard_a_db
+      BANK_DB_NAME: bank_a
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${SHARD_A_DB_PASSWORD:?Set SHARD_A_DB_PASSWORD in .env}
+    depends_on:
+      shard_a_db:
+        condition: service_healthy
+
+  bank_b1:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.shard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: B
+      REPLICA_ID: B1
+      BANK_DB_HOST: shard_b_db
+      BANK_DB_NAME: bank_b
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${SHARD_B_DB_PASSWORD:?Set SHARD_B_DB_PASSWORD in .env}
+    depends_on:
+      shard_b_db:
+        condition: service_healthy
+
+  bank_b2:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.shard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: B
+      REPLICA_ID: B2
+      BANK_DB_HOST: shard_b_db
+      BANK_DB_NAME: bank_b
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${SHARD_B_DB_PASSWORD:?Set SHARD_B_DB_PASSWORD in .env}
+    depends_on:
+      shard_b_db:
+        condition: service_healthy
+
+  coordinator:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.coordinator.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - coordinator_state:/app/state
+
+  gateway:
+    <<: *app
+    environment:
+      SHARD_MAP_FILE: /app/config/shard_map.json
+    command: ["python", "-m", "uvicorn", "bank_platform.gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${GATEWAY_BIND_HOST:-127.0.0.1}:${GATEWAY_HOST_PORT:-8001}:8000"
+    depends_on:
+      bank_a1:
+        condition: service_healthy
+      bank_a2:
+        condition: service_healthy
+      bank_b1:
+        condition: service_healthy
+      bank_b2:
+        condition: service_healthy
+      coordinator:
+        condition: service_healthy
+
+volumes:
+  shard_a_data:
+  shard_b_data:
+  coordinator_state:
