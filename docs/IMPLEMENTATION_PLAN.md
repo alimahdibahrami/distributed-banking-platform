@@ -28,15 +28,15 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
   and durability after database container restart.
 - VPS proof confirmed: Phase 2 isolation and PostgreSQL restart persistence both PASS.
 
-## Phase 3 - Gateway and replica routing (implemented; live gate pending)
+## Phase 3 - Gateway and replica routing (accepted on VPS)
 
 - Resolve account owner using Shard Map, then healthy replica (Round Robin).
 - Poll replica `/ready`; fail over **read-only** requests to healthy replicas of the same shard.
 - Expose Gateway balance inquiry, `/ready` and logs of selected replica.
 - All mutations are intentionally 501 until Phase 4.
-- Gate: run `python3 scripts/verify_phase3.py` and `--failover` on VPS; demonstrate experiments 1, 2 and 4.
+- VPS evidence: Phase 3 routing/80+80 read load PASS; injected A1 failure: A2 served 140 concurrent reads without errors; A1 rejoined Round Robin after restart.
 
-## Phase 4 - Local banking safety
+## Phase 4 - Local banking safety (implemented locally; VPS gate pending)
 
 - Reuse A1 API validation semantics for balance/deposit/withdraw.
 - ACID PostgreSQL transactions and explicit concurrency strategy.

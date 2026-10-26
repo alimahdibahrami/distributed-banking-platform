@@ -120,6 +120,41 @@ class ReplicaRouter:
         return None
 
 
+    async def write_once(self, shard: Shard, path: str, payload: dict) -> tuple[int, dict] | None:
+        """NEVER blindly fail over or retry an uncertain financial write."""
+        if self.available(shard.name) == 0:
+            await self.refresh()
+        replica = self.next_replica(shard, set())
+        if replica is None:
+            return None
+        try:
+            response = await self.client.post(f"{replica.url}{path}", json=payload)
+        except httpx.HTTPError as exc:
+            LOGGER.warning("gateway.write_uncertain shard=%s replica=%s exception=%s",
+                           shard.name, replica.name, type(exc).__name__)
+            self.set_health(replica, False)
+            return 504, {"error": "UNKNOWN_OUTCOME", "message": "Do not blindly retry the payment; verify balances first"}
+        if response.status_code == 503:
+            self.set_health(replica, False)
+            # Even a 503 could follow a successful DB commit and a response failure.
+            return 504, {"error": "UNKNOWN_OUTCOME", "message": "Backend failed; verify outcome before retry"}
+        if response.status_code not in (200, 400, 404, 409):
+            LOGGER.warning("gateway.write_unexpected shard=%s replica=%s status=%s",
+                           shard.name, replica.name, response.status_code)
+            return 504, {"error": "UNKNOWN_OUTCOME", "message": "Unexpected backend response; verify outcome"}
+        try:
+            data = response.json()
+        except ValueError:
+            return 504, {"error": "UNKNOWN_OUTCOME", "message": "Invalid backend response; verify outcome"}
+        if not isinstance(data, dict) or (response.status_code == 200 and (
+            data.get("shard") != shard.name or data.get("replica") != replica.name
+        )):
+            return 504, {"error": "UNKNOWN_OUTCOME", "message": "Backend identity mismatch"}
+        LOGGER.info("gateway.write shard=%s replica=%s action=%s", shard.name, replica.name, payload.get("action"))
+        return response.status_code, data
+
+
+
 async def poll_health(router: ReplicaRouter, interval_seconds: float) -> None:
     """Keep the pool current; cancellation is handled by the app lifespan."""
     while True:

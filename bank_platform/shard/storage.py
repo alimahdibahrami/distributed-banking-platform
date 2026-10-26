@@ -1,7 +1,6 @@
-"""PostgreSQL-backed read-only storage for phase 2.
+"""Authoritative PostgreSQL storage shared by replicas within a shard.
 
-No banking writes are exposed before phase 4. Each replica connects to its
-shard's single authoritative PostgreSQL instance; balances are never cached.
+Transactions and row locks run in PostgreSQL, never in per-replica memory.
 """
 from __future__ import annotations
 
@@ -9,6 +8,7 @@ import os
 from dataclasses import dataclass
 
 from bank_platform.common.shard_map import account_number
+from bank_platform.common.validation import BankingError, MAX_MONEY
 
 
 @dataclass(frozen=True)
@@ -87,3 +87,54 @@ class PostgresAccountStore:
                 cursor.execute("SELECT balance FROM accounts WHERE account_id = %s", (account_id,))
                 row = cursor.fetchone()
                 return int(row[0]) if row is not None else None
+
+
+    def mutate(self, action: str, account_id: str, amount: int) -> int:
+        """One local ACID transaction, SERIALIZE same-account writes with row lock."""
+        if action not in ("deposit", "withdraw"):
+            raise ValueError("Unsupported mutation")
+        if not self.owns(account_id):
+            raise ShardIdentityError("Account belongs to another shard")
+        if type(amount) is not int or not 1 <= amount <= MAX_MONEY:
+            raise ValueError("Invalid amount")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._verify_identity(cursor)
+                cursor.execute("SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE", (account_id,))
+                row = cursor.fetchone()
+                if row is None:
+                    raise BankingError("ACCOUNT_NOT_FOUND", "Account does not exist", 404)
+                old = int(row[0])
+                if action == "withdraw" and amount > old:
+                    raise BankingError("INSUFFICIENT_FUNDS", "Insufficient funds", 409)
+                if action == "deposit" and amount > MAX_MONEY - old:
+                    raise BankingError("BALANCE_OVERFLOW", "Balance exceeds 64-bit limit", 409)
+                new = old + amount if action == "deposit" else old - amount
+                cursor.execute("UPDATE accounts SET balance = %s WHERE account_id = %s", (new, account_id))
+        return new
+
+    def transfer_local(self, source: str, destination: str, amount: int) -> tuple[int, int]:
+        """Lock account rows in global order to avoid deadlocks across replicas."""
+        if source == destination or not self.owns(source) or not self.owns(destination):
+            raise ShardIdentityError("Transfer needs two distinct accounts owned by the same shard")
+        if type(amount) is not int or not 1 <= amount <= MAX_MONEY:
+            raise ValueError("Invalid amount")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._verify_identity(cursor)
+                balances = {}
+                for account in sorted((source, destination)):
+                    cursor.execute("SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE", (account,))
+                    row = cursor.fetchone()
+                    if row is None:
+                        raise BankingError("ACCOUNT_NOT_FOUND", "Account does not exist", 404)
+                    balances[account] = int(row[0])
+                if balances[source] < amount:
+                    raise BankingError("INSUFFICIENT_FUNDS", "Insufficient funds", 409)
+                if balances[destination] > MAX_MONEY - amount:
+                    raise BankingError("BALANCE_OVERFLOW", "Balance exceeds 64-bit limit", 409)
+                debited = balances[source] - amount
+                credited = balances[destination] + amount
+                cursor.execute("UPDATE accounts SET balance = %s WHERE account_id = %s", (debited, source))
+                cursor.execute("UPDATE accounts SET balance = %s WHERE account_id = %s", (credited, destination))
+        return debited, credited

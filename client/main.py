@@ -64,6 +64,10 @@ def main() -> None:
         p.add_argument("account")
         if action != "balance":
             p.add_argument("amount", type=int)
+    transfer = sub.add_parser("transfer", help="Transfer within a shard; cross-shard awaits 2PC")
+    transfer.add_argument("source")
+    transfer.add_argument("destination")
+    transfer.add_argument("amount", type=int)
     raw = sub.add_parser("raw", help="Send arbitrary body for malformed/error tests")
     raw.add_argument("body", help="Literal body; e.g. '{broken' or '{\"action\":\"transfer\"}'")
     load_parser = sub.add_parser("load", help="Concurrent withdraw test")
@@ -83,6 +87,10 @@ def main() -> None:
             resp = client.get("/health")
         elif args.command == "raw":
             resp = client.post("/api/v1/operations", content=args.body.encode(), headers={"content-type": "application/json"})
+        elif args.command == "transfer":
+            resp = client.post("/api/v1/operations", json={"action": "transfer",
+                               "from_account": args.source, "to_account": args.destination,
+                               "amount": args.amount})
         else:
             payload = {"action": args.command, "account": args.account}
             if args.command != "balance":

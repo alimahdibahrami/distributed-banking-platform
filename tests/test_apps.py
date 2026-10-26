@@ -22,8 +22,8 @@ def test_gateway_liveness_and_no_fake_success():
         "status": "alive", "service": "gateway", "banking_ready": False
     }
     response = invoke(app, "POST", "/api/v1/operations", json={"action": "withdraw", "account": "A0001", "amount": 1})
-    assert response.status_code == 501
-    assert response.json()["error"]["code"] == "NOT_IMPLEMENTED"
+    assert response.status_code == 503  # App lifespan not started, not a fake success.
+    assert response.json()["error"]["code"] == "GATEWAY_STARTING"
 
 
 @pytest.mark.parametrize("shard,replica", [("A", "A1"), ("A", "A2"), ("B", "B1"), ("B", "B2")])
@@ -34,7 +34,7 @@ def test_replica_identity_and_no_fake_success(shard, replica):
     assert result.json() == {"status": "alive", "service": "bank", "shard": shard,
                              "replica": replica, "banking_ready": False}
     result = invoke(app, "POST", "/internal/operations")
-    assert result.status_code == 501
+    assert result.status_code == 400  # Missing JSON body is invalid.
 
 
 def test_invalid_replica_identity_rejected():

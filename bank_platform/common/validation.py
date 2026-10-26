@@ -46,3 +46,30 @@ def validate_local_operation(raw: object) -> LocalOperation:
     if type(amount) is not int or amount < 1 or amount > MAX_MONEY:
         raise BankingError("INVALID_AMOUNT", "amount must be a positive 64-bit integer", 400)
     return LocalOperation(action, account, amount)
+
+
+@dataclass(frozen=True)
+class TransferOperation:
+    source: str
+    destination: str
+    amount: int
+
+
+def validate_transfer(raw: object) -> TransferOperation:
+    """Validate the local-transfer schema without assuming both accounts share a shard."""
+    if type(raw) is not dict or set(raw) != {"action", "from_account", "to_account", "amount"}:
+        raise BankingError("INVALID_REQUEST", "Transfer requires action, from_account, to_account and amount", 400)
+    if raw["action"] != "transfer":
+        raise BankingError("UNSUPPORTED_ACTION", "Expected transfer action", 400)
+    from bank_platform.common.shard_map import account_number
+    for key in ("from_account", "to_account"):
+        try:
+            account_number(raw[key])
+        except ValueError:
+            raise BankingError("INVALID_ACCOUNT", "Account ID must be A0001..A2000", 400) from None
+    if raw["from_account"] == raw["to_account"]:
+        raise BankingError("SAME_ACCOUNT", "Transfer source and destination must differ", 400)
+    amount = raw["amount"]
+    if type(amount) is not int or amount <= 0 or amount > MAX_MONEY:
+        raise BankingError("INVALID_AMOUNT", "amount must be a positive 64-bit integer", 400)
+    return TransferOperation(raw["from_account"], raw["to_account"], amount)

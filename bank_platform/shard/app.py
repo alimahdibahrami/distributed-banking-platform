@@ -1,13 +1,14 @@
-"""Banking replica: PostgreSQL-backed reads; writes remain disabled."""
+"""Banking replica with PostgreSQL-backed atomic local operations."""
 from __future__ import annotations
 
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from bank_platform.common.shard_map import account_number
+from bank_platform.common.validation import BankingError, validate_local_operation, validate_transfer
 from bank_platform.shard.storage import PostgresAccountStore
 
 LOGGER = logging.getLogger("uvicorn.error")  # Visible in Docker/Uvicorn logs
@@ -23,7 +24,7 @@ def create_app(
     if shard not in ("A", "B") or replica not in (f"{shard}1", f"{shard}2"):
         raise ValueError("Expected SHARD_ID=A/B and matching REPLICA_ID=A1/A2/B1/B2")
     storage = store if store is not None else PostgresAccountStore(shard)
-    app = FastAPI(title=f"Bank Replica {replica}", version="0.2.0")
+    app = FastAPI(title=f"Bank Replica {replica}", version="0.4.0")
     app.state.store = storage
 
     @app.get("/health")
@@ -65,12 +66,60 @@ def create_app(
         return {"account": account_id, "balance": balance, "shard": shard, "replica": replica}
 
     @app.post("/internal/operations")
-    def operations() -> JSONResponse:
-        return JSONResponse(status_code=501, content={
-            "status": "error", "error": {
-                "code": "NOT_IMPLEMENTED", "message": "Banking operations are not ready"
-            }
-        })
+    async def operations(request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "INVALID_REQUEST"})
+        try:
+            command = validate_local_operation(body)
+            account_number(command.account)
+        except BankingError as exc:
+            return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "INVALID_ACCOUNT"})
+        if not storage.owns(command.account):
+            return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
+        try:
+            if command.action == "balance":
+                value = storage.read_account(command.account)
+                if value is None:
+                    return JSONResponse(status_code=404, content={"error": "ACCOUNT_NOT_FOUND"})
+            else:
+                value = storage.mutate(command.action, command.account, command.amount)
+        except BankingError as exc:
+            return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
+        except Exception:
+            LOGGER.exception("Local banking operation failed on %s", replica)
+            return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
+        LOGGER.info("bank.operation action=%s account=%s shard=%s replica=%s", command.action, command.account, shard, replica)
+        return {"action": command.action, "account": command.account,
+                "balance": value, "shard": shard, "replica": replica}
+
+    @app.post("/internal/transfers")
+    async def transfer(request: Request):
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "INVALID_REQUEST"})
+        try:
+            command = validate_transfer(body)
+        except BankingError as exc:
+            return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
+        if not (storage.owns(command.source) and storage.owns(command.destination)):
+            return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
+        try:
+            from_balance, to_balance = storage.transfer_local(command.source, command.destination, command.amount)
+        except BankingError as exc:
+            return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
+        except Exception:
+            LOGGER.exception("Local transfer failed on %s", replica)
+            return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
+        LOGGER.info("bank.local_transfer from=%s to=%s amount=%d shard=%s replica=%s",
+                    command.source, command.destination, command.amount, shard, replica)
+        return {"action": "transfer", "from_account": command.source, "to_account": command.destination,
+                "from_balance": from_balance, "to_balance": to_balance,
+                "shard": shard, "replica": replica}
 
     return app
 

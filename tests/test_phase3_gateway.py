@@ -25,6 +25,8 @@ class FakeReplicas:
             reported = "B" if name in self.wrong_identity and shard == "A" else shard
             return httpx.Response(200, json={"status": "ready", "storage_ready": True,
                                              "shard": reported, "replica": name})
+        if request.url.path.startswith("/internal/operations") or request.url.path.startswith("/internal/transfers"):
+            return httpx.Response(503, json={"error": "NOT_IMPLEMENTED"})
         if name in self.fail_reads or not self.ready[name]:
             return httpx.Response(503, json={"error": "STORAGE_UNAVAILABLE"})
         account = request.url.path.rsplit("/", 1)[-1]
@@ -68,7 +70,7 @@ def test_round_robin_is_independent_per_shard_and_logged(caplog):
     run(check)
 
 
-def test_post_balance_is_supported_but_writes_remain_501():
+def test_post_balance_and_writes_never_fall_back_to_read_path():
     async def check(client, router, upstream):
         response = await client.post("/api/v1/operations", json={"action": "balance", "account": "A0500"})
         assert response.status_code == 200
@@ -76,9 +78,10 @@ def test_post_balance_is_supported_but_writes_remain_501():
         for action in ("deposit", "withdraw"):
             result = await client.post("/api/v1/operations", json={"action": action,
                                                                    "account": "A0500", "amount": 10})
-            assert result.status_code == 501
-            assert result.json()["error"]["code"] == "NOT_IMPLEMENTED"
-        assert all("/internal/operations" not in path for _, path in upstream.requests)
+            # Phase 3 fake upstream does not implement the new operation contract.
+            # An unsuccessful write must not be silently treated as success.
+            assert result.status_code != 200
+        assert any("/internal/operations" in path for _, path in upstream.requests)
     run(check)
 
 

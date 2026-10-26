@@ -6,7 +6,7 @@
 
 تبدیل سامانه بانکداری تکلیف اول به یک بانک توزیع‌شده که حساب‌ها را در دو شارد مستقل نگه می‌دارد، درخواست‌ها را بین Replicaهای سالم پخش می‌کند و انتقال بین شاردها را با **Two-Phase Commit (2PC) واقعی و قابل بازیابی** انجام می‌دهد. تمام سرویس‌ها باید با **Docker Compose روی یک میزبان** اجرا شوند.
 
-> **وضعیت فعلی: فاز ۳ — مسیریابی خواندنی Gateway و Round Robin پیاده‌سازی و تست محلی شده‌اند؛ تأیید Failover روی VPS باقی است.** فاز ۲ با تست واقعی PostgreSQL و Restart روی VPS پذیرفته شده است. استعلام موجودی از Gateway پشتیبانی می‌شود، اما واریز/برداشت، انتقال وجه، 2PC و بازیابی **هنوز پیاده‌سازی نشده‌اند** و برای عملیات نوشتنی پاسخ `501` طبیعی است.
+> **وضعیت فعلی: فاز ۴ — عملیات محلی اتمیک و انتقال داخل شارد پیاده‌سازی شده‌اند و تست محلی پاس شده است؛ پذیرش عملی فاز ۴ روی VPS باقی است.** فازهای ۲ و ۳ با آزمایش روی VPS پذیرفته شده‌اند. انتقال بین دو شارد، 2PC و بازیابی Coordinator هنوز آماده نیستند؛ انتقال بین‌شاردی عمداً پاسخ `501` می‌دهد.
 
 ## معماری هدف
 
@@ -28,22 +28,23 @@ Gateway (shard lookup + healthy replica selection)
 
 هر دو Replica در یک شارد به دیتابیس **مشترک همان شارد** وصل می‌شوند؛ دیتابیس‌های A و B مستقل‌اند. Gateway تنها ورودی عمومی سامانه است. Coordinator در پایان فازهای ۵ و ۶ تصمیمات تراکنش را به‌شکل پایدار ثبت و بازیابی خواهد کرد.
 
-## ساختار پروژه تا فاز ۳
+## ساختار پروژه تا فاز ۴
 
 | مسیر | نقش فعلی |
 |---|---|
-| `bank_platform/gateway/` | مسیریابی استعلام موجودی، Round Robin در هر شارد، بررسی سلامت Replica و Failover خواندنی |
-| `bank_platform/shard/` | سرویس Replicaها، مسیر تست خواندن حساب و بررسی آمادگی دیتابیس |
+| `bank_platform/gateway/` | مسیریابی همه عملیات محلی، Round Robin در هر شارد، بررسی سلامت Replica و Failover فقط برای خواندن |
+| `bank_platform/shard/` | سرویس Replicaها، عملیات واریز/برداشت و انتقال اتمیک داخلی، بررسی آمادگی دیتابیس |
 | `bank_platform/coordinator/` | اسکلت Coordinator؛ پیاده‌سازی 2PC در فازهای بعد |
-| `bank_platform/common/validation.py` | اعتبارسنجی محلی برگرفته از تکلیف اول |
+| `bank_platform/common/validation.py` | اعتبارسنجی Balance/Deposit/Withdraw و Transfer داخلی |
 | `bank_platform/common/shard_map.py` | شناسایی قطعی شارد مالک حساب برای مسیریابی HTTP |
 | `config/shard_map.json` | محدوده حساب‌ها و آدرس Replicaها |
 | `compose.yaml` | ۸ سرویس اصلی + ۲ Job یک‌بارمصرف راه‌اندازی دیتابیس |
 | `client/main.py` | کلاینت برگرفته از تکلیف اول با فرمان Health Check |
 | `database/shard_a.sql` و `shard_b.sql` | ساخت جدول‌ها و داده اولیه، با حفظ موجودی موجود هنگام اجرای دوباره |
-| `bank_platform/shard/storage.py` | خواندن واقعی PostgreSQL با بررسی شناسنامه دیتابیس و مالکیت حساب |
+| `bank_platform/shard/storage.py` | خواندن و نوشتن PostgreSQL با قفل‌گذاری سطری، تراکنش اتمیک و بررسی مالکیت حساب |
 | `scripts/verify_phase2.py` | تأیید عملی دو دیتابیس و چهار Replica روی VPS (پاس شده) |
-| `scripts/verify_phase3.py` | تست واقعی توزیع بار، مسیریابی و قطع یک Replica روی VPS |
+| `scripts/verify_phase3.py` | تست واقعی توزیع بار، مسیریابی و قطع یک Replica روی VPS (پاس شده) |
+| `scripts/verify_phase4.py` | تست واقعی واریز/برداشت موازی و انتقال داخلی، بدون تغییر خالص موجودی تست‌ها |
 | `tests/` | تست‌های محلی واحد و ساختاری؛ جایگزین اجرای PostgreSQL واقعی نیستند |
 
 **توجه:** تنظیمات `max_prepared_transactions=100` از همین حالا برای دیتابیس‌ها قرار داده شده، اما این به معنی پیاده‌سازی 2PC نیست.
@@ -55,7 +56,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-## اجرای فاز ۳ روی VPS (بدون دست زدن به Assignment 1)
+## اجرای فاز ۴ روی VPS (بدون دست زدن به Assignment 1)
 
 از ریشه این ریپو روی VPS و پس از اطمینان از نصب Docker Compose:
 
@@ -70,6 +71,7 @@ python3 scripts/verify_phase2.py
 python3 scripts/verify_phase3.py
 # با توقف عمدی bank_a1 و راه‌اندازی مجدد آن:
 python3 scripts/verify_phase3.py --failover
+python3 scripts/verify_phase4.py
 ```
 
 برای اثبات پایداری داده بعد از Restart دیتابیس‌ها:
@@ -80,7 +82,7 @@ python3 scripts/verify_phase2.py --restart-check
 
 اسکریپت این موارد را بررسی می‌کند: وجود ۱۰۰۰ حساب در هر دیتابیس، عدم هم‌پوشانی، رد نوشتن روی شارد نامربوط توسط PostgreSQL، مقدار اولیه A0500=1000 و A1500=500، و پاسخ یکسان Replicaهای A1/A2 و B1/B2. اجرای مجدد Jobهای مقداردهی اولیه **موجودی حساب‌های قبلی را بازنویسی نمی‌کند**.
 
-مسیر `GET /internal/accounts/{account}` صرفاً داخلی است. در فاز ۳ درگاه عمومی `GET /api/v1/accounts/{account}/balance` و عملیات `balance` در `POST /api/v1/operations` را به Replica سالم شارد درست هدایت می‌کند. واریز/برداشت همچنان `501` است و هیچ پورت دیتابیس یا Replica روی میزبان منتشر نشده است.
+مسیر `GET /internal/accounts/{account}` داخلی است. درگاه عمومی `GET /api/v1/accounts/{account}/balance` و `POST /api/v1/operations` را به Replica سالم شارد درست هدایت می‌کند. عملیات `deposit`، `withdraw` و `transfer` داخلی پشتیبانی می‌شوند؛ انتقال بین‌شاردی تا پیاده‌سازی 2PC غیرفعال است. هیچ پورت دیتابیس یا Replica روی میزبان منتشر نشده است.
 
 سرویس‌های `shard_a_init` و `shard_b_init` بعد از ساخت جدول و Seed با وضعیت Exit(0) متوقف می‌شوند؛ این دو **جزء سرویس‌های دائماً فعال نیستند**. برای اجرای مجدد SQL روی دیتابیس‌های قبلی:
 
@@ -130,3 +132,17 @@ docker compose run --rm shard_b_init
 - Round Robin برای A و B جداست؛ انتخاب Replica ناسالم متوقف می‌شود و بعد از بازیابی دوباره وارد چرخه می‌شود.
 - تنها استعلام‌های **خواندنی** قابلیت تلاش مجدد روی Replica دیگر دارند؛ Retry نوشتن پول نیازمند طراحی فاز ۴ است.
 - جزئیات تست قطع کانتینر: `docs/PHASE3_ACCEPTANCE.md`.
+
+## عملیات محلی فاز ۴
+
+```json
+{"action":"deposit","account":"A0701","amount":10}
+{"action":"withdraw","account":"A0701","amount":5}
+{"action":"transfer","from_account":"A0701","to_account":"A0702","amount":5}
+```
+
+هر درخواست نوشتنی تنها به یک Replica در شارد مالک فرستاده می‌شود. قفل `SELECT ... FOR UPDATE` روی PostgreSQL مشترک از Lost Update جلوگیری می‌کند. هر دو طرف انتقال داخلی در یک تراکنش دیتابیس Commit می‌شوند یا هر دو Rollback می‌شوند.
+
+**محدودیت فعلی:** در صورت Timeout یا قطع ارتباط هنگام عملیات پولی، Gateway پاسخ `504 UNKNOWN_OUTCOME` می‌دهد و درخواست را به Replica دیگر تکرار نمی‌کند. تا زمان پیاده‌سازی شناسه درخواست و استعلام وضعیت پایدار در مراحل بعد، کاربر نباید درخواست مالی نامشخص را کورکورانه تکرار کند. `banking_ready=false` به معنای ناتمام بودن کل عملیات بانکداری توزیع‌شده از جمله 2PC است، نه ناموجود بودن عملیات محلی.
+
+آزمایش‌ها و معیار پذیرش: `docs/PHASE4_ACCEPTANCE.md`.
