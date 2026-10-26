@@ -2,7 +2,7 @@
 """Live Phase 4 checks against localhost Gateway. No database reset/delete.
 
 Requires Phase 4 deployed with four healthy replicas. Uses accounts A0701,
-A0702, B1701, B1702. Tests are balance-neutral on full success; if any
+A0702, A1701, A1702. Tests are balance-neutral on full success; if any
 request has uncertain status, it STOPS rather than applying blind retries.
 """
 from __future__ import annotations
@@ -58,17 +58,17 @@ def concurrent_run(tasks, label: str):
 
 
 def check() -> None:
-    initial = {a: balance(a) for a in ("A0701", "A0702", "B1701", "B1702")}
+    initial = {a: balance(a) for a in ("A0701", "A0702", "A1701", "A1702")}
     print("Initial balances:", initial)
 
-    for shard, account in (("A", "A0701"), ("B", "B1701")):
+    for shard, account in (("A", "A0701"), ("B", "A1701")):
         before = balance(account)
         code, result = call({"action": "withdraw", "account": account, "amount": before + 1})
         assert code == 409 and result["error"]["code"] == "INSUFFICIENT_FUNDS", result
         assert balance(account) == before, f"Insufficient withdraw changed balance of {account}"
         print(f"PASS: rejected insufficient withdrawal on shard {shard}")
 
-    for shard, account in (("A", "A0701"), ("B", "B1701")):
+    for shard, account in (("A", "A0701"), ("B", "A1701")):
         # Deposits/withdrawals run against one account through different replicas.
         jobs = ([lambda a=account: operation("deposit", a, 2) for _ in range(30)]
                 + [lambda a=account: operation("withdraw", a, 2) for _ in range(30)])
@@ -77,7 +77,7 @@ def check() -> None:
         assert balance(account) == initial[account], f"Lost update on {account}"
         print(f"PASS: no lost updates for {account}")
 
-    for shard, source, destination in (("A", "A0701", "A0702"), ("B", "B1701", "B1702")):
+    for shard, source, destination in (("A", "A0701", "A0702"), ("B", "A1701", "A1702")):
         total_before = balance(source) + balance(destination)
         before = (balance(source), balance(destination))
         forward = transfer(source, destination, 10)
@@ -93,7 +93,7 @@ def check() -> None:
         assert (balance(source), balance(destination)) == before
         print(f"PASS: atomic, deadlock-free local transfers preserve sum in shard {shard}")
 
-    code, result = call({"action": "transfer", "from_account": "A0701", "to_account": "B1701", "amount": 1})
+    code, result = call({"action": "transfer", "from_account": "A0701", "to_account": "A1701", "amount": 1})
     assert code == 501 and result.get("error", {}).get("code") == "CROSS_SHARD_2PC_NOT_READY", result
     assert {a: balance(a) for a in initial} == initial, "Test fixture did not end at initial balances"
     print("PASS: cross-shard transfer safely disabled; all four test balances preserved")
