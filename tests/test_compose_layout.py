@@ -11,7 +11,7 @@ def test_compose_service_layout_and_separation():
     config = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = config["services"]
     assert config["name"] == "distributed-banking"
-    assert set(services) == {"gateway", "coordinator", "bank_a1", "bank_a2", "bank_b1", "bank_b2", "shard_a_db", "shard_b_db"}
+    assert set(services) == {"gateway", "coordinator", "bank_a1", "bank_a2", "bank_b1", "bank_b2", "shard_a_db", "shard_b_db", "shard_a_init", "shard_b_init"}
     assert "ports" not in services["shard_a_db"]
     assert "ports" not in services["shard_b_db"]
     assert all("ports" not in services[f"bank_{x}"] for x in ("a1", "a2", "b1", "b2"))

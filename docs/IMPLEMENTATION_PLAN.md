@@ -3,7 +3,7 @@
 Source of truth: `Assignment2_Distributed_Banking_Platform.pdf`, sections 1-9.
 No GitHub Issues. One or more scoped commits per phase; each phase is accepted only after testing.
 
-## Phase 1 - Bootstrap (this package)
+## Phase 1 - Bootstrap (implemented; VPS runtime proof pending)
 
 - Independent Python package and source layout; no Assignment 1 data carried over.
 - Two database service definitions with persistent volumes, four replica definitions,
@@ -15,12 +15,19 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
   and expose expected liveness; no accidental interaction with Assignment 1.
 - IMPORTANT: Runtime Docker/Compose validation is pending until deployment on VPS.
 
-## Phase 2 - Persistent sharding
+## Phase 2 - Persistent sharding (implementation committed; live gate pending)
 
-- PostgreSQL schema, migrations/initialization, shard-owned accounts and seed data.
-- Ensure no account has authoritative state on both shards.
-- Real PostgreSQL access from both replicas of a shard.
-- Gate: direct DB inspection proves correct placement and durable restart behavior.
+- Two idempotent SQL initialization jobs run against both fresh and existing volumes.
+- 1000 distinct accounts per shard, with database-level range CHECK constraints.
+- A0500=1000 and A1500=500 as in the instructor example; existing balances never overwritten.
+- Persistent shard identity metadata, verified before reading any account.
+- Each replica has PostgreSQL-backed read-only account lookup; no in-memory balance.
+- Gateway still returns 501; banking writes intentionally remain Phase 4.
+- Gate: on VPS run `python3 scripts/verify_phase2.py --restart-check` and collect proof
+  of direct DB placement, read from A1/A2/B1/B2, rejection of wrong-shard insert,
+  and durability after database container restart.
+- Docker and live PostgreSQL are unavailable in the current code-authoring environment;
+  passing Python/static tests does not satisfy the live gate.
 
 ## Phase 3 - Gateway and replica routing
 
@@ -79,7 +86,7 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
   FastAPI service/HTTP test conventions, non-root Docker image.
 - Not imported: A1 SQLite balance DB, single-server service, Docker volumes,
   VPS upgrade scripts, legacy seed accounts.
-- A1's three original seed accounts (A1001/A1002/A1003) are NOT the
-  full 2-shard fixture required for A2; seed data will be defined in Phase 2.
+- A1's three original seed accounts (A1001/A1002/A1003) are NOT imported;
+  Phase 2 defines an independent 2000-account fixture across PostgreSQL A/B.
 
 Progress accounting: completion is acceptance-gate based, not lines of code.

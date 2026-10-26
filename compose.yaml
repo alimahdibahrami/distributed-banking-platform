@@ -55,6 +55,37 @@ services:
       timeout: 3s
       retries: 15
 
+  # One-shot, idempotent schema + seed jobs also cover existing Phase-1 DB volumes.
+  shard_a_init:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      PGHOST: shard_a_db
+      PGDATABASE: bank_a
+      PGUSER: bank
+      PGPASSWORD: ${SHARD_A_DB_PASSWORD:?Set SHARD_A_DB_PASSWORD in .env}
+    volumes:
+      - ./database/shard_a.sql:/bootstrap/shard.sql:ro
+    command: ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", "/bootstrap/shard.sql"]
+    depends_on:
+      shard_a_db:
+        condition: service_healthy
+
+  shard_b_init:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      PGHOST: shard_b_db
+      PGDATABASE: bank_b
+      PGUSER: bank
+      PGPASSWORD: ${SHARD_B_DB_PASSWORD:?Set SHARD_B_DB_PASSWORD in .env}
+    volumes:
+      - ./database/shard_b.sql:/bootstrap/shard.sql:ro
+    command: ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", "/bootstrap/shard.sql"]
+    depends_on:
+      shard_b_db:
+        condition: service_healthy
+
   bank_a1:
     <<: *app
     command: ["python", "-m", "uvicorn", "bank_platform.shard.app:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -65,9 +96,15 @@ services:
       BANK_DB_NAME: bank_a
       BANK_DB_USER: bank
       BANK_DB_PASSWORD: ${SHARD_A_DB_PASSWORD:?Set SHARD_A_DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     depends_on:
-      shard_a_db:
-        condition: service_healthy
+      shard_a_init:
+        condition: service_completed_successfully
 
   bank_a2:
     <<: *app
@@ -79,9 +116,15 @@ services:
       BANK_DB_NAME: bank_a
       BANK_DB_USER: bank
       BANK_DB_PASSWORD: ${SHARD_A_DB_PASSWORD:?Set SHARD_A_DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     depends_on:
-      shard_a_db:
-        condition: service_healthy
+      shard_a_init:
+        condition: service_completed_successfully
 
   bank_b1:
     <<: *app
@@ -93,9 +136,15 @@ services:
       BANK_DB_NAME: bank_b
       BANK_DB_USER: bank
       BANK_DB_PASSWORD: ${SHARD_B_DB_PASSWORD:?Set SHARD_B_DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     depends_on:
-      shard_b_db:
-        condition: service_healthy
+      shard_b_init:
+        condition: service_completed_successfully
 
   bank_b2:
     <<: *app
@@ -107,9 +156,15 @@ services:
       BANK_DB_NAME: bank_b
       BANK_DB_USER: bank
       BANK_DB_PASSWORD: ${SHARD_B_DB_PASSWORD:?Set SHARD_B_DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     depends_on:
-      shard_b_db:
-        condition: service_healthy
+      shard_b_init:
+        condition: service_completed_successfully
 
   coordinator:
     <<: *app

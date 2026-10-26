@@ -6,7 +6,7 @@
 
 تبدیل سامانه بانکداری تکلیف اول به یک بانک توزیع‌شده که حساب‌ها را در دو شارد مستقل نگه می‌دارد، درخواست‌ها را بین Replicaهای سالم پخش می‌کند و انتقال بین شاردها را با **Two-Phase Commit (2PC) واقعی و قابل بازیابی** انجام می‌دهد. تمام سرویس‌ها باید با **Docker Compose روی یک میزبان** اجرا شوند.
 
-> **وضعیت فعلی: فاز ۱ — اسکلت پروژه.** فقط سرویس‌های اولیه، پیکربندی، تست‌های پایه و Health Check آماده‌اند. مسیرهای بانکی فعلاً عمداً `501 NOT_IMPLEMENTED` می‌دهند. موجودی، تراکنش پایگاه داده، مسیریابی عملیاتی، 2PC و بازیابی **هنوز پیاده‌سازی نشده‌اند**.
+> **وضعیت فعلی: فاز ۲ — کد شاردینگ پایدار آماده، تأیید Docker روی VPS باقی است.** جدول حساب‌ها، شناسنامه هر شارد، مقداردهی اولیه قابل‌تکرار و خواندن مستقیم از PostgreSQL در Replicaها پیاده‌سازی شده است. مسیریابی عملیاتی Gateway، واریز/برداشت، انتقال وجه، 2PC و بازیابی **هنوز پیاده‌سازی نشده‌اند**؛ برای آن‌ها پاسخ `501` طبیعی است.
 
 ## معماری هدف
 
@@ -26,62 +26,66 @@ Gateway (shard lookup + healthy replica selection)
             PostgreSQL A                    PostgreSQL B
 ```
 
-هر دو Replica در یک شارد، در آینده فقط به دیتابیس **مشترک همان شارد** دسترسی خواهند داشت؛ داده‌های دو دیتابیس مستقل‌اند. Gateway تنها ورودی عمومی سامانه است. Coordinator در پایان فازهای ۵ و ۶ تصمیمات تراکنش را به‌شکل پایدار ثبت و بازیابی خواهد کرد.
+هر دو Replica در یک شارد به دیتابیس **مشترک همان شارد** وصل می‌شوند؛ دیتابیس‌های A و B مستقل‌اند. Gateway تنها ورودی عمومی سامانه است. Coordinator در پایان فازهای ۵ و ۶ تصمیمات تراکنش را به‌شکل پایدار ثبت و بازیابی خواهد کرد.
 
-## اجزای بسته فاز ۱
+## ساختار پروژه تا فاز ۲
 
 | مسیر | نقش فعلی |
 |---|---|
 | `bank_platform/gateway/` | سرویس Gateway با Health Check؛ عملیات بانکی هنوز غیرفعال |
-| `bank_platform/shard/` | سرویس مشترک Replicaها با شناسه A1/A2/B1/B2 |
+| `bank_platform/shard/` | سرویس Replicaها، مسیر تست خواندن حساب و بررسی آمادگی دیتابیس |
 | `bank_platform/coordinator/` | اسکلت Coordinator؛ پیاده‌سازی 2PC در فازهای بعد |
 | `bank_platform/common/validation.py` | اعتبارسنجی محلی برگرفته از تکلیف اول |
 | `bank_platform/common/shard_map.py` | شناسایی مالک حساب با نقشه قطعی (فعلاً بدون HTTP routing) |
 | `config/shard_map.json` | محدوده حساب‌ها و آدرس Replicaها |
-| `compose.yaml` | دو PostgreSQL، چهار Replica، Gateway و Coordinator؛ مجموع ۸ سرویس |
+| `compose.yaml` | ۸ سرویس اصلی + ۲ Job یک‌بارمصرف راه‌اندازی دیتابیس |
 | `client/main.py` | کلاینت برگرفته از تکلیف اول با فرمان Health Check |
-| `tests/` | تست‌های پایه مستقل از Docker |
+| `database/shard_a.sql` و `shard_b.sql` | ساخت جدول‌ها و داده اولیه، با حفظ موجودی موجود هنگام اجرای دوباره |
+| `bank_platform/shard/storage.py` | خواندن واقعی PostgreSQL با بررسی شناسنامه دیتابیس و مالکیت حساب |
+| `scripts/verify_phase2.py` | تأیید عملی دو دیتابیس و چهار Replica روی VPS |
+| `tests/` | تست‌های محلی واحد و ساختاری؛ جایگزین اجرای PostgreSQL واقعی نیستند |
 
 **توجه:** تنظیمات `max_prepared_transactions=100` از همین حالا برای دیتابیس‌ها قرار داده شده، اما این به معنی پیاده‌سازی 2PC نیست.
 
-## اجرای محلی تست‌های فاز ۱
-
-روی Python 3.12 یا نسخه سازگار:
+## تست‌های محلی
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-## اجرای Docker Compose (فقط اسکلت؛ هنوز بانک عملیاتی نیست)
+## اجرای فاز ۲ روی VPS (بدون دست زدن به Assignment 1)
+
+از ریشه این ریپو روی VPS و پس از اطمینان از نصب Docker Compose:
 
 ```bash
-cp .env.example .env
-# دو مقدار SHARD_A_DB_PASSWORD و SHARD_B_DB_PASSWORD را به رمزهای قوی تغییر بدهید.
+bash scripts/preflight_vps.sh
+cp .env.example .env  # فقط بار اول؛ اگر .env موجود است آن را بازنویسی نکنید
+# رمزهای SHARD_A_DB_PASSWORD و SHARD_B_DB_PASSWORD را در .env تغییر بدهید.
 docker compose config --quiet
 docker compose up -d --build
-docker compose ps
-curl -fsS http://127.0.0.1:8001/health
-python scripts/smoke_phase1.py
+docker compose ps -a
+python3 scripts/verify_phase2.py
 ```
 
-در فاز ۱ پاسخ `health` فقط **زنده بودن پردازش** را تأیید می‌کند و فیلد `banking_ready: false` دارد. بانک هنوز آماده پردازش پول نیست. برای دیدن چهار Replica و دو دیتابیس:
+برای اثبات پایداری داده بعد از Restart دیتابیس‌ها:
 
 ```bash
-docker compose ps
-docker compose logs --tail=30 bank_a1 bank_a2 bank_b1 bank_b2
-# دیدن وضعیت PostgreSQL بدون انتشار پورت دیتابیس
-docker compose exec shard_a_db pg_isready -U bank -d bank_a
-docker compose exec shard_b_db pg_isready -U bank -d bank_b
+python3 scripts/verify_phase2.py --restart-check
 ```
 
-همه سرویس‌ها با نام پروژه Compose مستقل `distributed-banking` راه‌اندازی می‌شوند. Gateway پیش‌فرض روی `127.0.0.1:8001` است و پورت دیتابیس‌ها منتشر نمی‌شود. تنظیمات `.env` واقعی را Commit نکنید. **`docker compose down -v` نزنید**؛ این دستور Volumeهای داده را پاک می‌کند.
+اسکریپت این موارد را بررسی می‌کند: وجود ۱۰۰۰ حساب در هر دیتابیس، عدم هم‌پوشانی، رد نوشتن روی شارد نامربوط توسط PostgreSQL، مقدار اولیه A0500=1000 و A1500=500، و پاسخ یکسان Replicaهای A1/A2 و B1/B2. اجرای مجدد Jobهای مقداردهی اولیه **موجودی حساب‌های قبلی را بازنویسی نمی‌کند**.
 
-برای توقف بدون حذف Volumeها:
+توجه: مسیر `GET /internal/accounts/{account}` فقط یک مسیر داخلی و صرفاً خواندنی برای اثبات ذخیره‌سازی در فاز ۲ است؛ درگاه عمومی (Gateway) همچنان عملیات بانکی را با `501` رد می‌کند. هیچ پورتی برای دیتابیس یا Replica روی میزبان منتشر نشده است.
+
+سرویس‌های `shard_a_init` و `shard_b_init` بعد از ساخت جدول و Seed با وضعیت Exit(0) متوقف می‌شوند؛ این دو **جزء سرویس‌های دائماً فعال نیستند**. برای اجرای مجدد SQL روی دیتابیس‌های قبلی:
 
 ```bash
-docker compose down
+docker compose run --rm shard_a_init
+docker compose run --rm shard_b_init
 ```
+
+**ایمنی:** نام پروژه Docker Compose برابر `distributed-banking` است؛ داده Assignment 1 دست‌نخورده می‌ماند. به‌هیچ‌وجه `docker compose down -v` یا `docker volume prune` اجرا نکنید. برای توقف بدون حذف داده‌ها `docker compose down` کافی است.
 
 ## ترتیب توسعه (بدون Issue؛ Commit محور)
 
