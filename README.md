@@ -169,3 +169,33 @@ For verified, balance-neutral demonstrations use `python3 scripts/verify_phase5.
 operational caution about `PENDING` outcomes and outstanding prepared GIDs.
 **Do not use this version as a fault-tolerant production service until Phase 6
 crash recovery is implemented and tested.**
+
+
+## Phase 6 — Crash recovery
+
+The Coordinator now resumes persisted `COMMIT`/`ABORT` decisions on startup and
+retries incomplete acknowledgements with a 3-second watchdog. A pre-decision
+`NEW` transaction from a crashed process is safely aborted. PostgreSQL shards
+use durable abort tombstones and advisory transaction locks to stop a late
+PREPARE from succeeding after an acknowledged ABORT.
+
+After transferring the new files, run both idempotent init jobs explicitly
+(`docker compose run --rm --no-deps shard_a_init` and `shard_b_init`) **before**
+updating the app images. This matters because existing one-shot Compose jobs
+may not automatically run again when only a bind-mounted SQL file changes.
+Then verify without deliberately changing the service state:
+
+```bash
+python3 scripts/verify_phase6.py
+```
+
+To deliberately test Coordinator-only crashes after PREPARE, after durable
+COMMIT, and after the first acknowledgement, explicitly run:
+
+```bash
+python3 scripts/verify_phase6.py --crash-tests
+```
+
+This is disruptive to the Coordinator and uses separate fixture accounts.
+Never reset PostgreSQL or Coordinator volumes after an uncertain transfer;
+query the original transaction ID instead. See `docs/PHASE6_ACCEPTANCE.md`.

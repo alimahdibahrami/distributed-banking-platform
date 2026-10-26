@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
@@ -25,11 +26,21 @@ def create_app(*, journal: DecisionJournal | None = None,
     async def lifespan(app):
         db.initialize()
         async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(6.0)) as client:
-            app.state.engine = CoordinatorEngine(db, load_shard_map(os.getenv('SHARD_MAP_FILE', str(MAP))), client)
-            yield
-            app.state.engine = None
+            engine = CoordinatorEngine(db, load_shard_map(os.getenv('SHARD_MAP_FILE', str(MAP))), client)
+            app.state.engine = engine
+            # Resolve all journal decisions from before this process started.
+            # Unknown NEW records become durable ABORT, never COMMIT.
+            await engine.recover_once(startup=True)
+            monitor = asyncio.create_task(engine.watchdog(float(os.getenv('COORDINATOR_RECOVERY_INTERVAL', '3'))))
+            try:
+                yield
+            finally:
+                monitor.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor
+                app.state.engine = None
 
-    app = FastAPI(title='Durable 2PC Coordinator', version='0.5.0', lifespan=lifespan)
+    app = FastAPI(title='Durable 2PC Coordinator', version='0.6.0', lifespan=lifespan)
     app.state.engine = None
 
     @app.get('/health')

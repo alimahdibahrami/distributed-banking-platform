@@ -179,6 +179,7 @@ services:
     environment:
       SHARD_MAP_FILE: /app/config/shard_map.json
       COORDINATOR_DB_PATH: /app/state/coordinator.sqlite3
+      COORDINATOR_RECOVERY_INTERVAL: "3"
     command: ["python", "-m", "uvicorn", "bank_platform.coordinator.app:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
       - coordinator_state:/app/state

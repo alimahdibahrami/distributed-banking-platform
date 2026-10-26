@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS tpc_participant_commits (
     amount BIGINT NOT NULL CHECK (amount > 0),
     committed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Phase 6: durable abort tombstone.  A timed-out PREPARE cannot
+-- resurrect a transaction after its ABORT has been acknowledged.
+CREATE TABLE IF NOT EXISTS tpc_participant_aborts (
+    transaction_id UUID PRIMARY KEY,
+    aborted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- Seed history prevents a future restart from re-creating accounts moved by live resharding.
 CREATE TABLE IF NOT EXISTS bootstrap_history (
     seed_id TEXT PRIMARY KEY,

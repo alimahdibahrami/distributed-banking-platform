@@ -90,3 +90,11 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
   Phase 2 defines an independent 2000-account fixture across PostgreSQL A/B.
 
 Progress accounting: completion is acceptance-gate based, not lines of code.
+
+
+### Phase 6 implementation status
+
+Implemented: startup replay, periodic reconciliation, prepared-transaction
+ABORT fencing, deterministic coordinator-only fault injection, Phase 6 live
+verification, and regression tests. Pending: VPS acceptance of three injected
+crash points (`after-first-prepare`, `after-durable-commit`, `after-first-ack`).

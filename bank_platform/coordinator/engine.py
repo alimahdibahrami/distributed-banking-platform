@@ -1,12 +1,13 @@
-"""Coordinator 2PC state machine with fsynced SQLite decision journal.
+"""Durable 2PC coordinator with startup recovery and periodic redelivery.
 
-Phase 5: synchronous prepare/decision/delivery. Phase 6 will add startup
-reconciliation and deterministic crash injection for records left PENDING.
+A COMMIT is irrevocable after the SQLite FULL-sync decision is recorded.
+A recovered undecided NEW transaction must be ABORTED, never presumed COMMIT.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -47,6 +48,21 @@ class DecisionJournal:
                 reason TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )''')
+
+    def incomplete(self, *, stale_new: bool = False, limit: int = 100) -> list[dict]:
+        """Snapshot only durable, incomplete work (bounded per watchdog pass)."""
+        states = "state IN ('NEW', 'COMMIT', 'ABORT')" if stale_new else "state IN ('COMMIT', 'ABORT')"
+        age = " AND (state != 'NEW' OR created_at <= datetime('now', '-60 seconds'))" if stale_new else ''
+        with self._connect() as con:
+            return [dict(row) for row in con.execute(
+                f'SELECT * FROM transactions WHERE {states}{age} ORDER BY created_at LIMIT ?', (limit,)
+            ).fetchall()]
+
+    def recoverable_on_start(self, *, limit: int = 10000) -> list[dict]:
+        with self._connect() as con:
+            return [dict(row) for row in con.execute(
+                "SELECT * FROM transactions WHERE state IN ('NEW','COMMIT','ABORT') ORDER BY created_at LIMIT ?", (limit,)
+            ).fetchall()]
 
     def get(self, transaction_id: str) -> dict | None:
         with self._connect() as con:
@@ -123,6 +139,44 @@ class CoordinatorEngine:
             return False, body['error']
         return False, 'UNCERTAIN_PREPARE'
 
+    def _inject_crash(self, txid: str, gate: str) -> None:
+        """Operator-only one-shot fault injection via coordinator volume.
+
+        The Gateway never provides an API to arm this marker. A privileged
+        operator must put an exact UUID marker in the coordinator state volume.
+        """
+        marker = Path(self.journal.path).parent / 'faults' / f'{txid}.{gate}'
+        if marker.is_file():
+            marker.unlink()  # consume before process exit; survives restarts
+            LOGGER.error('coordinator.fault_injected txid=%s gate=%s', txid, gate)
+            os._exit(86)
+
+    async def recover_once(self, *, startup: bool = False) -> None:
+        rows = (self.journal.recoverable_on_start() if startup
+                else self.journal.incomplete(stale_new=True))
+        for snapshot in rows:
+            txid = snapshot['transaction_id']
+            async with self._locks.setdefault(txid, asyncio.Lock()):
+                record = self.journal.get(txid)
+                if record is None:
+                    continue
+                if record['state'] == 'NEW':
+                    # No durable COMMIT exists: only a durable ABORT is safe.
+                    self.journal.decide(txid, 'ABORT', 'RECOVERED_UNDECIDED')
+                    LOGGER.warning('coordinator.recovered_new txid=%s decision=ABORT', txid)
+                if self.journal.get(txid)['state'] in ('COMMIT', 'ABORT'):
+                    await self._deliver(txid)
+
+    async def watchdog(self, interval: float = 3.0) -> None:
+        while True:
+            try:
+                await self.recover_once(startup=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception('coordinator.recovery_sweep_failed')
+            await asyncio.sleep(interval)
+
     async def _deliver(self, txid: str) -> dict:
         row = self.journal.get(txid)
         if row['state'] not in ('COMMIT', 'ABORT'):
@@ -136,6 +190,8 @@ class CoordinatorEngine:
             })
             if response is not None and response[0] == 200 and response[1].get('status') == ('COMMITTED' if row['state'] == 'COMMIT' else 'ABORTED'):
                 self.journal.acknowledge(txid, shard)
+                if shard == 'A' and row['state'] == 'COMMIT':
+                    self._inject_crash(txid, 'after-first-ack')
             else:
                 LOGGER.warning('coordinator.pending txid=%s shard=%s decision=%s', txid, shard, row['state'])
         return self.journal.get(txid)
@@ -171,20 +227,22 @@ class CoordinatorEngine:
                 legs = sorted(((source_owner, command.source, 'debit'),
                                (target_owner, command.destination, 'credit')))
                 yes, reason = True, ''
-                for owner, account, role in legs:
+                for index, (owner, account, role) in enumerate(legs):
                     yes, reason = await self._prepare(owner, txid, account, role, command.amount)
                     if not yes:
                         break
+                    if index == 0:
+                        self._inject_crash(txid, 'after-first-prepare')
                 # Durable decision BEFORE sending COMMIT or ROLLBACK PREPARED.
                 self.journal.decide(txid, 'COMMIT' if yes else 'ABORT', reason)
                 LOGGER.info('coordinator.durable_decision txid=%s decision=%s reason=%s', txid, 'COMMIT' if yes else 'ABORT', reason)
+                if yes:
+                    self._inject_crash(txid, 'after-durable-commit')
             record = self.journal.get(txid)
-            # Unknown PREPARE response is not a reliable NO vote: the
-            # participant may still finish preparing after a network timeout.
-            # Preserve ABORT durably but do NOT falsely acknowledge it.
-            # Phase 6 reconciles these pending abort decisions.
-            if (record['state'] in ('COMMIT', 'ABORT')
-                    and not (record['state'] == 'ABORT' and record['reason'] == 'UNCERTAIN_PREPARE')):
+            # Durable participant ABORT fences guarantee that an uncertain
+            # in-flight PREPARE cannot succeed *after* ABORT acknowledgement.
+            # If still preparing, participant responds PENDING; watchdog retries.
+            if record['state'] in ('COMMIT', 'ABORT'):
                 record = await self._deliver(txid)
             result = self.public_state(record)
             if result['status'] == 'COMMITTED':

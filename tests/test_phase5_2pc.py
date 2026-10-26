@@ -30,6 +30,7 @@ class MockParticipants:
         self.balance = {'A0801': 100, 'A1801': 200}
         self.pending = {}
         self.committed = set()
+        self.aborted = set()
         self.prepares = []
         self.decisions = []
         self.reject_credit = False
@@ -51,6 +52,8 @@ class MockParticipants:
                 raise httpx.ReadTimeout('ambiguous prepare response', request=req)
             if key in self.committed:
                 return httpx.Response(200, json={'status': 'COMMITTED'})
+            if key in self.aborted:
+                return httpx.Response(409, json={'error': 'TRANSACTION_ABORTED'})
             if key in self.pending:
                 return httpx.Response(200, json={'status': 'PREPARED'})
             if shard == 'A' and self.balance['A0801'] < payload['amount']:
@@ -70,6 +73,8 @@ class MockParticipants:
                     account = 'A0801' if shard == 'A' else 'A1801'
                     self.balance[account] += -command['amount'] if shard == 'A' else command['amount']
                     self.committed.add(key)
+            if decision == 'ABORT':
+                self.aborted.add(key)  # fake durable fence
             return httpx.Response(200, json={'status': 'COMMITTED' if decision == 'COMMIT' else 'ABORTED'})
         return httpx.Response(404, json={'error': 'NOT_FOUND'})
 
@@ -133,17 +138,20 @@ def test_durable_commit_incomplete_must_return_pending_then_redeliver(tmp_path):
     assert journal.get(command['transaction_id'])['state'] == 'DONE'
 
 
-def test_uncertain_prepare_never_reports_abort_as_complete(tmp_path):
+def test_uncertain_prepare_can_be_aborted_after_durable_fencing(tmp_path):
     fake = MockParticipants()
     fake.uncertain_prepare = True
-    journal, code, result = asyncio.run(drive(tmp_path, fake, body()))
-    assert code == 202 and result['status'] == 'PENDING'
+    command = body()
+    journal, code, result = asyncio.run(drive(tmp_path, fake, command))
+    # Mock ABORT creates the same durable late-prepare fence as PostgreSQL.
+    assert code == 409 and result['status'] == 'ABORTED'
     assert result['decision'] == 'ABORT'
     assert result['reason'] == 'UNCERTAIN_PREPARE'
-    assert result['acknowledged_shards'] == []
-    assert journal.get(result['transaction_id'])['state'] == 'ABORT'
-    # No premature ABORT confirmation even if one prepare still in flight.
-    assert fake.decisions == []
+    assert set(result['acknowledged_shards']) == {'A', 'B'}
+    assert journal.get(result['transaction_id'])['state'] == 'ABORTED'
+    assert fake.pending == {}
+    assert fake.balance == {'A0801': 100, 'A1801': 200}
+    assert {('A', command['transaction_id']), ('B', command['transaction_id'])} <= fake.aborted
 
 
 def test_reusing_transaction_id_for_different_transfer_is_rejected(tmp_path):
