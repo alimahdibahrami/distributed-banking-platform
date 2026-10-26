@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS accounts (
         account_id ~ '^A[0-9]{4}$' AND substring(account_id from 2)::INTEGER BETWEEN 1 AND 1000
     )
 );
+-- Phase 5: committed participant receipt belongs to the SAME prepared transaction.
+-- The receipt is invisible until COMMIT PREPARED and guards duplicate application.
+CREATE TABLE IF NOT EXISTS tpc_participant_commits (
+    transaction_id UUID PRIMARY KEY,
+    account_id VARCHAR(5) NOT NULL REFERENCES accounts(account_id),
+    role VARCHAR(6) NOT NULL CHECK (role IN ('debit', 'credit')),
+    amount BIGINT NOT NULL CHECK (amount > 0),
+    committed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- Seed history prevents a future restart from re-creating accounts moved by live resharding.
 CREATE TABLE IF NOT EXISTS bootstrap_history (
     seed_id TEXT PRIMARY KEY,

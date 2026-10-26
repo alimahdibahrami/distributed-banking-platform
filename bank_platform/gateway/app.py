@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from uuid import uuid4
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -41,6 +42,7 @@ def create_app(
         async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(2.5)) as client:
             router = ReplicaRouter(mapping, client)
             app.state.router = router
+            app.state.coordinator_client = client
             await router.refresh()
             monitor = asyncio.create_task(poll_health(router, interval))
             try:
@@ -50,10 +52,12 @@ def create_app(
                 with suppress(asyncio.CancelledError):
                     await monitor
                 app.state.router = None
+                app.state.coordinator_client = None
 
     app = FastAPI(title="Distributed Banking Gateway", version="0.4.0", lifespan=lifespan)
     app.state.shard_map = mapping
     app.state.router = None
+    app.state.coordinator_client = None
 
     @app.get("/health")
     def health() -> dict:
@@ -89,6 +93,27 @@ def create_app(
     async def get_balance(account_id: str):
         return await balance(account_id)
 
+    @app.get('/api/v1/transactions/{transaction_id}')
+    async def transaction_status(transaction_id: str):
+        from bank_platform.shard.twopc import normalize_txid
+        try:
+            txid = normalize_txid(transaction_id)
+        except BankingError as exc:
+            return error(exc.http_status, exc.code, exc.message)
+        client = app.state.coordinator_client
+        if client is None:
+            return error(503, 'GATEWAY_STARTING', 'Gateway not ready')
+        try:
+            response = await client.get(
+                os.getenv('COORDINATOR_URL', 'http://coordinator:8000').rstrip('/') + '/internal/transactions/' + txid,
+                timeout=4.0)
+            result = response.json()
+            if response.status_code in (200, 404) and isinstance(result, dict):
+                return JSONResponse(status_code=response.status_code, content=result)
+        except (httpx.HTTPError, ValueError):
+            pass
+        return error(503, 'STATUS_UNAVAILABLE', 'Coordinator status temporarily unavailable')
+
     @app.post("/api/v1/operations")
     async def operations(request: Request):
         try:
@@ -101,7 +126,40 @@ def create_app(
                 first = mapping.owner_for(transfer.source)
                 second = mapping.owner_for(transfer.destination)
                 if first.name != second.name:
-                    return error(501, "CROSS_SHARD_2PC_NOT_READY", "Cross-shard transfers need Phase 5 coordinator")
+                    client = app.state.coordinator_client
+                    if client is None:
+                        return error(503, "GATEWAY_STARTING", "Gateway has not completed startup")
+                    # Caller can supply a stable UUIDv4 to safely repeat or query.
+                    txid = raw.get('transaction_id') or str(uuid4())
+                    request_body = {**raw, 'transaction_id': txid}
+                    try:
+                        response = await client.post(
+                            os.getenv('COORDINATOR_URL', 'http://coordinator:8000').rstrip('/') + '/internal/transactions',
+                            json=request_body, timeout=20.0)
+                        data = response.json()
+                    except (httpx.HTTPError, ValueError):
+                        return JSONResponse(status_code=504, content={
+                            'status': 'UNKNOWN_OUTCOME', 'transaction_id': txid,
+                            'error': {'code': 'UNKNOWN_OUTCOME', 'message': 'Query transaction status; do not resubmit with a new ID'},
+                        })
+                    if not isinstance(data, dict):
+                        return error(504, 'UNKNOWN_OUTCOME', 'Malformed coordinator reply')
+                    if response.status_code == 200 and data.get('status') == 'COMMITTED':
+                        return {'action': 'transfer', 'from_account': transfer.source,
+                                'to_account': transfer.destination, 'amount': transfer.amount, **data}
+                    if response.status_code == 202 and data.get('status') == 'PENDING':
+                        return JSONResponse(status_code=202, content=data)
+                    if response.status_code == 409:
+                        return JSONResponse(status_code=409, content={
+                            'status': data.get('status', 'error'), 'transaction_id': txid,
+                            'decision': data.get('decision', 'UNKNOWN'),
+                            'error': {'code': data.get('reason') or data.get('error', 'TRANSFER_REJECTED'),
+                                      'message': 'Cross-shard transfer rejected'},
+                        })
+                    return JSONResponse(status_code=503, content={
+                        'status': 'UNKNOWN_OUTCOME', 'transaction_id': txid,
+                        'error': {'code': 'COORDINATOR_UNAVAILABLE', 'message': 'Query transaction ID before retry'},
+                    })
                 shard, path = first, "/internal/transfers"
             else:
                 command = validate_local_operation(raw)

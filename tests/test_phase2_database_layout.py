@@ -23,7 +23,7 @@ def test_phase2_schema_identity_range_and_seed_protection():
 def test_phase2_compose_db_bootstrap_and_healthy_replica_dependencies():
     cfg = yaml.safe_load((ROOT / "compose.yaml").read_text())
     services = cfg["services"]
-    assert len(services) == 10  # 8 long-lived services + 2 one-shot initializers
+    assert len(services) == 11  # 8 long-lived services + 3 one-shot init jobs from Phase 5
     for sid in ("a", "b"):
         init = services[f"shard_{sid}_init"]
         assert init["depends_on"][f"shard_{sid}_db"]["condition"] == "service_healthy"

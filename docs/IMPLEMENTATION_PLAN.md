@@ -36,14 +36,14 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
 - All mutations are intentionally 501 until Phase 4.
 - VPS evidence: Phase 3 routing/80+80 read load PASS; injected A1 failure: A2 served 140 concurrent reads without errors; A1 rejoined Round Robin after restart.
 
-## Phase 4 - Local banking safety (implemented locally; VPS gate pending)
+## Phase 4 - Local banking safety (accepted on VPS)
 
 - Reuse A1 API validation semantics for balance/deposit/withdraw.
 - ACID PostgreSQL transactions and explicit concurrency strategy.
 - Transfer within one shard uses a single atomic transaction.
-- Gate: concurrency/rollback/insufficient-funds tests pass; same-shard transfer atomic.
+- Gate accepted on VPS: 60 concurrent writes + 60 same-shard transfers per shard; no lost updates; all balances restored.
 
-## Phase 5 - Real cross-shard 2PC
+## Phase 5 - Real cross-shard 2PC (local implementation; VPS acceptance pending)
 
 - Durable unique transaction IDs and coordinator states.
 - PostgreSQL PREPARE TRANSACTION (not two sequential committed updates).

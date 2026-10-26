@@ -175,7 +175,7 @@ class GatewayFake:
         return httpx.Response(200, json={"account":"A0001","shard":name[0],"replica":name,"balance":1000})
 
 
-def test_gateway_local_transfer_and_cross_shard_rejection():
+def test_gateway_local_transfer_and_cross_shard_coordinator_unavailable():
     upstream = GatewayFake()
     app = gateway_app(transport=httpx.MockTransport(upstream), poll_interval=3600)
     async def check():
@@ -184,7 +184,7 @@ def test_gateway_local_transfer_and_cross_shard_rejection():
             same = await request(app, "POST", "/api/v1/operations", json=body)
             assert same.status_code == 200 and same.json()["shard"] == "A"
             other = await request(app, "POST", "/api/v1/operations", json={**body, "to_account":"A1500"})
-            assert other.status_code == 501 and other.json()["error"]["code"] == "CROSS_SHARD_2PC_NOT_READY"
+            assert other.status_code == 503 and other.json()["error"]["code"] == "COORDINATOR_UNAVAILABLE"
             assert len(upstream.writes) == 1 and upstream.writes[0][0].startswith("A")
             d = await request(app, "POST", "/api/v1/operations", json={"action":"deposit","account":"A1500","amount":5})
             assert d.status_code == 200 and d.json()["shard"] == "B"

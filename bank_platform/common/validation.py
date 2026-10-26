@@ -57,7 +57,7 @@ class TransferOperation:
 
 def validate_transfer(raw: object) -> TransferOperation:
     """Validate the local-transfer schema without assuming both accounts share a shard."""
-    if type(raw) is not dict or set(raw) != {"action", "from_account", "to_account", "amount"}:
+    if type(raw) is not dict or not ({"action", "from_account", "to_account", "amount"} <= set(raw)) or set(raw) - {"action", "from_account", "to_account", "amount", "transaction_id"}:
         raise BankingError("INVALID_REQUEST", "Transfer requires action, from_account, to_account and amount", 400)
     if raw["action"] != "transfer":
         raise BankingError("UNSUPPORTED_ACTION", "Expected transfer action", 400)
@@ -72,4 +72,12 @@ def validate_transfer(raw: object) -> TransferOperation:
     amount = raw["amount"]
     if type(amount) is not int or amount <= 0 or amount > MAX_MONEY:
         raise BankingError("INVALID_AMOUNT", "amount must be a positive 64-bit integer", 400)
+    if "transaction_id" in raw:
+        from uuid import UUID
+        try:
+            txid = UUID(raw["transaction_id"])
+            if txid.version != 4 or str(txid) != raw["transaction_id"]:
+                raise ValueError("UUIDv4 required")
+        except (ValueError, TypeError, AttributeError):
+            raise BankingError("INVALID_TRANSACTION_ID", "transaction_id must be canonical UUIDv4", 400) from None
     return TransferOperation(raw["from_account"], raw["to_account"], amount)

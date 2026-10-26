@@ -93,10 +93,12 @@ def check() -> None:
         assert (balance(source), balance(destination)) == before
         print(f"PASS: atomic, deadlock-free local transfers preserve sum in shard {shard}")
 
-    code, result = call({"action": "transfer", "from_account": "A0701", "to_account": "A1701", "amount": 1})
-    assert code == 501 and result.get("error", {}).get("code") == "CROSS_SHARD_2PC_NOT_READY", result
+    # Phase 5 enables cross-shard operations, so verify invalid input is rejected
+    # without moving money rather than expecting the former Phase 4 stub 501.
+    code, result = call({"action": "transfer", "from_account": "A0701", "to_account": "A1701", "amount": 0})
+    assert code == 400 and result.get("error", {}).get("code") == "INVALID_AMOUNT", result
     assert {a: balance(a) for a in initial} == initial, "Test fixture did not end at initial balances"
-    print("PASS: cross-shard transfer safely disabled; all four test balances preserved")
+    print("PASS: invalid cross-shard transfer rejected; all four test balances preserved")
     print("PASS: Phase 4 live verification completed")
 
 

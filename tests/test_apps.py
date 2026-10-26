@@ -45,4 +45,4 @@ def test_invalid_replica_identity_rejected():
 def test_coordinator_liveness_and_no_fake_success():
     app = coordinator_app()
     assert invoke(app, "GET", "/health").json()["transactions_ready"] is False
-    assert invoke(app, "POST", "/internal/transactions").status_code == 501
+    assert invoke(app, "POST", "/internal/transactions").status_code == 503

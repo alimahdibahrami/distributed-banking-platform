@@ -166,17 +166,32 @@ services:
       shard_b_init:
         condition: service_completed_successfully
 
+  # Initialize the pre-existing named volume with the non-root app UID.
+  coordinator_state_init:
+    image: postgres:17-alpine
+    restart: "no"
+    entrypoint: ["sh", "-c", "chown 10001:10001 /app/state"]
+    volumes:
+      - coordinator_state:/app/state
+
   coordinator:
     <<: *app
+    environment:
+      SHARD_MAP_FILE: /app/config/shard_map.json
+      COORDINATOR_DB_PATH: /app/state/coordinator.sqlite3
     command: ["python", "-m", "uvicorn", "bank_platform.coordinator.app:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
       - coordinator_state:/app/state
+    depends_on:
+      coordinator_state_init:
+        condition: service_completed_successfully
 
   gateway:
     <<: *app
     environment:
       SHARD_MAP_FILE: /app/config/shard_map.json
       GATEWAY_HEALTH_INTERVAL: "2"
+      COORDINATOR_URL: http://coordinator:8000
     command: ["python", "-m", "uvicorn", "bank_platform.gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "${GATEWAY_BIND_HOST:-127.0.0.1}:${GATEWAY_HOST_PORT:-8001}:8000"

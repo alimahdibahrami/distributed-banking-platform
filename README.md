@@ -146,3 +146,26 @@ docker compose run --rm shard_b_init
 **محدودیت فعلی:** در صورت Timeout یا قطع ارتباط هنگام عملیات پولی، Gateway پاسخ `504 UNKNOWN_OUTCOME` می‌دهد و درخواست را به Replica دیگر تکرار نمی‌کند. تا زمان پیاده‌سازی شناسه درخواست و استعلام وضعیت پایدار در مراحل بعد، کاربر نباید درخواست مالی نامشخص را کورکورانه تکرار کند. `banking_ready=false` به معنای ناتمام بودن کل عملیات بانکداری توزیع‌شده از جمله 2PC است، نه ناموجود بودن عملیات محلی.
 
 آزمایش‌ها و معیار پذیرش: `docs/PHASE4_ACCEPTANCE.md`.
+
+
+## Phase 5 -- cross-shard 2PC (pending VPS acceptance)
+
+Cross-shard transfers now use a durable Coordinator decision journal (SQLite,
+existing `coordinator_state` volume) and PostgreSQL native `PREPARE TRANSACTION`
+with `COMMIT PREPARED` / `ROLLBACK PREPARED`. Participant receipts are committed
+atomically with account updates; duplicate client transaction IDs cannot debit
+a second time. The Gateway publishes an operation status lookup:
+
+```bash
+# Run only against a deployed Phase 5 Gateway on VPS:
+curl -X POST http://127.0.0.1:8001/api/v1/operations \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"transfer","from_account":"A0801","to_account":"A1801","amount":5,"transaction_id":"11111111-1111-4111-8111-111111111111"}'
+curl http://127.0.0.1:8001/api/v1/transactions/11111111-1111-4111-8111-111111111111
+```
+
+For verified, balance-neutral demonstrations use `python3 scripts/verify_phase5.py`
+(instead of the manual sample above). See `docs/PHASE5_ACCEPTANCE.md` for
+operational caution about `PENDING` outcomes and outstanding prepared GIDs.
+**Do not use this version as a fault-tolerant production service until Phase 6
+crash recovery is implemented and tested.**
