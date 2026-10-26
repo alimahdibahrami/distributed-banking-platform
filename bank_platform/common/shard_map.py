@@ -1,4 +1,4 @@
-"""Deterministic account ownership only; actual HTTP routing is Phase 2/3."""
+"""Deterministic account ownership used by the Gateway before replica selection."""
 from __future__ import annotations
 
 import json

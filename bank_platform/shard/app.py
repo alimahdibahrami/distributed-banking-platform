@@ -1,4 +1,4 @@
-"""Banking replica: persistent shard-aware reads only in phase 2."""
+"""Banking replica: PostgreSQL-backed reads; writes remain disabled."""
 from __future__ import annotations
 
 import logging
@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from bank_platform.common.shard_map import account_number
 from bank_platform.shard.storage import PostgresAccountStore
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("uvicorn.error")  # Visible in Docker/Uvicorn logs
 
 
 def create_app(
@@ -61,6 +61,7 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
         if balance is None:
             return JSONResponse(status_code=404, content={"error": "ACCOUNT_NOT_FOUND"})
+        LOGGER.info("bank.read account=%s shard=%s replica=%s", account_id, shard, replica)
         return {"account": account_id, "balance": balance, "shard": shard, "replica": replica}
 
     @app.post("/internal/operations")

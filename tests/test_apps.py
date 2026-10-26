@@ -21,7 +21,7 @@ def test_gateway_liveness_and_no_fake_success():
     assert invoke(app, "GET", "/health").json() == {
         "status": "alive", "service": "gateway", "banking_ready": False
     }
-    response = invoke(app, "POST", "/api/v1/operations", json={"action": "balance", "account": "A0001"})
+    response = invoke(app, "POST", "/api/v1/operations", json={"action": "withdraw", "account": "A0001", "amount": 1})
     assert response.status_code == 501
     assert response.json()["error"]["code"] == "NOT_IMPLEMENTED"
 

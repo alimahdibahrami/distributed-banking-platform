@@ -3,7 +3,7 @@
 Source of truth: `Assignment2_Distributed_Banking_Platform.pdf`, sections 1-9.
 No GitHub Issues. One or more scoped commits per phase; each phase is accepted only after testing.
 
-## Phase 1 - Bootstrap (implemented; VPS runtime proof pending)
+## Phase 1 - Bootstrap (accepted on VPS)
 
 - Independent Python package and source layout; no Assignment 1 data carried over.
 - Two database service definitions with persistent volumes, four replica definitions,
@@ -13,28 +13,28 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
 - Tests for service identity, HTTP liveness, stub safety, sharding boundaries and static Compose shape.
 - Gate: Python unit tests pass, Compose config validated on a Docker host, containers start
   and expose expected liveness; no accidental interaction with Assignment 1.
-- IMPORTANT: Runtime Docker/Compose validation is pending until deployment on VPS.
+- VPS execution confirmed: all services healthy; Assignment 1 remains separate.
 
-## Phase 2 - Persistent sharding (implementation committed; live gate pending)
+## Phase 2 - Persistent sharding (accepted on VPS)
 
 - Two idempotent SQL initialization jobs run against both fresh and existing volumes.
 - 1000 distinct accounts per shard, with database-level range CHECK constraints.
 - A0500=1000 and A1500=500 as in the instructor example; existing balances never overwritten.
 - Persistent shard identity metadata, verified before reading any account.
 - Each replica has PostgreSQL-backed read-only account lookup; no in-memory balance.
-- Gateway still returns 501; banking writes intentionally remain Phase 4.
+- At Phase 2 completion, Gateway reads were still 501; Phase 3 adds read-only routing. Banking writes remain Phase 4.
 - Gate: on VPS run `python3 scripts/verify_phase2.py --restart-check` and collect proof
   of direct DB placement, read from A1/A2/B1/B2, rejection of wrong-shard insert,
   and durability after database container restart.
-- Docker and live PostgreSQL are unavailable in the current code-authoring environment;
-  passing Python/static tests does not satisfy the live gate.
+- VPS proof confirmed: Phase 2 isolation and PostgreSQL restart persistence both PASS.
 
-## Phase 3 - Gateway and replica routing
+## Phase 3 - Gateway and replica routing (implemented; live gate pending)
 
 - Resolve account owner using Shard Map, then healthy replica (Round Robin).
-- Implement health checks and fail selection; requests cannot go to unrelated shard.
-- Logs identify the selected replica for load distribution evidence.
-- Gate: experiments 1, 2 and 4 pass under live Docker.
+- Poll replica `/ready`; fail over **read-only** requests to healthy replicas of the same shard.
+- Expose Gateway balance inquiry, `/ready` and logs of selected replica.
+- All mutations are intentionally 501 until Phase 4.
+- Gate: run `python3 scripts/verify_phase3.py` and `--failover` on VPS; demonstrate experiments 1, 2 and 4.
 
 ## Phase 4 - Local banking safety
 

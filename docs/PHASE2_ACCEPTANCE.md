@@ -25,11 +25,11 @@ Run `python -m pytest -q` (unit and static checks). These tests cannot substitut
 6. Execute `python3 scripts/verify_phase2.py --restart-check` (PostgreSQL container restarts, then re-read).
 7. Confirm Assignment 1 is still running and its data/volumes are unchanged.
 
-**Status: pending live runtime verification.** Do not mark Phase 2 completely accepted until all seven checks pass on the user's VPS.
+**Status: ACCEPTED on VPS (2026-10-26).** Both 2000-account isolation and PostgreSQL restart persistence tests passed; all four replicas and Gateway were healthy, and Assignment 1 remained online.
 
 ## Current limitations
 
 - Shard owner map is fixed A0001..A1000 / A1001..A2000. Live ownership migration comes in optional bonus.
-- There is no request routing or load balancing yet; those are Phase 3.
+- Phase 3 adds read-only Gateway routing and load balancing.
 - There is no deposit, withdraw, transfer, coordinator logic or 2PC yet.
 - No auto-restart/self-healing; Docker restart policy stays `no`.

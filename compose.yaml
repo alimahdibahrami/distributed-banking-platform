@@ -176,6 +176,7 @@ services:
     <<: *app
     environment:
       SHARD_MAP_FILE: /app/config/shard_map.json
+      GATEWAY_HEALTH_INTERVAL: "2"
     command: ["python", "-m", "uvicorn", "bank_platform.gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "${GATEWAY_BIND_HOST:-127.0.0.1}:${GATEWAY_HOST_PORT:-8001}:8000"

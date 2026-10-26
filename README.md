@@ -6,7 +6,7 @@
 
 تبدیل سامانه بانکداری تکلیف اول به یک بانک توزیع‌شده که حساب‌ها را در دو شارد مستقل نگه می‌دارد، درخواست‌ها را بین Replicaهای سالم پخش می‌کند و انتقال بین شاردها را با **Two-Phase Commit (2PC) واقعی و قابل بازیابی** انجام می‌دهد. تمام سرویس‌ها باید با **Docker Compose روی یک میزبان** اجرا شوند.
 
-> **وضعیت فعلی: فاز ۲ — کد شاردینگ پایدار آماده، تأیید Docker روی VPS باقی است.** جدول حساب‌ها، شناسنامه هر شارد، مقداردهی اولیه قابل‌تکرار و خواندن مستقیم از PostgreSQL در Replicaها پیاده‌سازی شده است. مسیریابی عملیاتی Gateway، واریز/برداشت، انتقال وجه، 2PC و بازیابی **هنوز پیاده‌سازی نشده‌اند**؛ برای آن‌ها پاسخ `501` طبیعی است.
+> **وضعیت فعلی: فاز ۳ — مسیریابی خواندنی Gateway و Round Robin پیاده‌سازی و تست محلی شده‌اند؛ تأیید Failover روی VPS باقی است.** فاز ۲ با تست واقعی PostgreSQL و Restart روی VPS پذیرفته شده است. استعلام موجودی از Gateway پشتیبانی می‌شود، اما واریز/برداشت، انتقال وجه، 2PC و بازیابی **هنوز پیاده‌سازی نشده‌اند** و برای عملیات نوشتنی پاسخ `501` طبیعی است.
 
 ## معماری هدف
 
@@ -28,21 +28,22 @@ Gateway (shard lookup + healthy replica selection)
 
 هر دو Replica در یک شارد به دیتابیس **مشترک همان شارد** وصل می‌شوند؛ دیتابیس‌های A و B مستقل‌اند. Gateway تنها ورودی عمومی سامانه است. Coordinator در پایان فازهای ۵ و ۶ تصمیمات تراکنش را به‌شکل پایدار ثبت و بازیابی خواهد کرد.
 
-## ساختار پروژه تا فاز ۲
+## ساختار پروژه تا فاز ۳
 
 | مسیر | نقش فعلی |
 |---|---|
-| `bank_platform/gateway/` | سرویس Gateway با Health Check؛ عملیات بانکی هنوز غیرفعال |
+| `bank_platform/gateway/` | مسیریابی استعلام موجودی، Round Robin در هر شارد، بررسی سلامت Replica و Failover خواندنی |
 | `bank_platform/shard/` | سرویس Replicaها، مسیر تست خواندن حساب و بررسی آمادگی دیتابیس |
 | `bank_platform/coordinator/` | اسکلت Coordinator؛ پیاده‌سازی 2PC در فازهای بعد |
 | `bank_platform/common/validation.py` | اعتبارسنجی محلی برگرفته از تکلیف اول |
-| `bank_platform/common/shard_map.py` | شناسایی مالک حساب با نقشه قطعی (فعلاً بدون HTTP routing) |
+| `bank_platform/common/shard_map.py` | شناسایی قطعی شارد مالک حساب برای مسیریابی HTTP |
 | `config/shard_map.json` | محدوده حساب‌ها و آدرس Replicaها |
 | `compose.yaml` | ۸ سرویس اصلی + ۲ Job یک‌بارمصرف راه‌اندازی دیتابیس |
 | `client/main.py` | کلاینت برگرفته از تکلیف اول با فرمان Health Check |
 | `database/shard_a.sql` و `shard_b.sql` | ساخت جدول‌ها و داده اولیه، با حفظ موجودی موجود هنگام اجرای دوباره |
 | `bank_platform/shard/storage.py` | خواندن واقعی PostgreSQL با بررسی شناسنامه دیتابیس و مالکیت حساب |
-| `scripts/verify_phase2.py` | تأیید عملی دو دیتابیس و چهار Replica روی VPS |
+| `scripts/verify_phase2.py` | تأیید عملی دو دیتابیس و چهار Replica روی VPS (پاس شده) |
+| `scripts/verify_phase3.py` | تست واقعی توزیع بار، مسیریابی و قطع یک Replica روی VPS |
 | `tests/` | تست‌های محلی واحد و ساختاری؛ جایگزین اجرای PostgreSQL واقعی نیستند |
 
 **توجه:** تنظیمات `max_prepared_transactions=100` از همین حالا برای دیتابیس‌ها قرار داده شده، اما این به معنی پیاده‌سازی 2PC نیست.
@@ -54,7 +55,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-## اجرای فاز ۲ روی VPS (بدون دست زدن به Assignment 1)
+## اجرای فاز ۳ روی VPS (بدون دست زدن به Assignment 1)
 
 از ریشه این ریپو روی VPS و پس از اطمینان از نصب Docker Compose:
 
@@ -66,6 +67,9 @@ docker compose config --quiet
 docker compose up -d --build
 docker compose ps -a
 python3 scripts/verify_phase2.py
+python3 scripts/verify_phase3.py
+# با توقف عمدی bank_a1 و راه‌اندازی مجدد آن:
+python3 scripts/verify_phase3.py --failover
 ```
 
 برای اثبات پایداری داده بعد از Restart دیتابیس‌ها:
@@ -76,7 +80,7 @@ python3 scripts/verify_phase2.py --restart-check
 
 اسکریپت این موارد را بررسی می‌کند: وجود ۱۰۰۰ حساب در هر دیتابیس، عدم هم‌پوشانی، رد نوشتن روی شارد نامربوط توسط PostgreSQL، مقدار اولیه A0500=1000 و A1500=500، و پاسخ یکسان Replicaهای A1/A2 و B1/B2. اجرای مجدد Jobهای مقداردهی اولیه **موجودی حساب‌های قبلی را بازنویسی نمی‌کند**.
 
-توجه: مسیر `GET /internal/accounts/{account}` فقط یک مسیر داخلی و صرفاً خواندنی برای اثبات ذخیره‌سازی در فاز ۲ است؛ درگاه عمومی (Gateway) همچنان عملیات بانکی را با `501` رد می‌کند. هیچ پورتی برای دیتابیس یا Replica روی میزبان منتشر نشده است.
+مسیر `GET /internal/accounts/{account}` صرفاً داخلی است. در فاز ۳ درگاه عمومی `GET /api/v1/accounts/{account}/balance` و عملیات `balance` در `POST /api/v1/operations` را به Replica سالم شارد درست هدایت می‌کند. واریز/برداشت همچنان `501` است و هیچ پورت دیتابیس یا Replica روی میزبان منتشر نشده است.
 
 سرویس‌های `shard_a_init` و `shard_b_init` بعد از ساخت جدول و Seed با وضعیت Exit(0) متوقف می‌شوند؛ این دو **جزء سرویس‌های دائماً فعال نیستند**. برای اجرای مجدد SQL روی دیتابیس‌های قبلی:
 
@@ -118,3 +122,11 @@ docker compose run --rm shard_b_init
 سورس در GitHub، تمام ایمیج‌های ضروری در Docker Hub، گزارش فنی حداکثر ۱۰ صفحه A4 و ویدئو حداکثر ۱۵ دقیقه. موعد سند: `۱۴۰۵/۰۸/۱۵`؛ تحویل: LMS، GitHub و Docker Hub.
 
 **مرجع اصلی:** `Assignment2_Distributed_Banking_Platform.pdf`. کد تکلیف اول صرفاً به‌عنوان مبنای مهندسی استفاده شده و پروژه فعلی هیچ فایل یا Volume آن را تغییر نمی‌دهد.
+
+## یادداشت فاز ۳
+
+- `GET /health` صرفاً سلامت فرایند Gateway است و `banking_ready=false` تا پیاده‌سازی تراکنش‌ها باقی می‌ماند.
+- `GET /ready` زمانی ۲۰۰ می‌دهد که برای **هر شارد** حداقل یک Replica آماده وجود داشته باشد.
+- Round Robin برای A و B جداست؛ انتخاب Replica ناسالم متوقف می‌شود و بعد از بازیابی دوباره وارد چرخه می‌شود.
+- تنها استعلام‌های **خواندنی** قابلیت تلاش مجدد روی Replica دیگر دارند؛ Retry نوشتن پول نیازمند طراحی فاز ۴ است.
+- جزئیات تست قطع کانتینر: `docs/PHASE3_ACCEPTANCE.md`.
