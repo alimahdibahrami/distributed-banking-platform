@@ -61,18 +61,38 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict:
-        # Liveness is deliberately distinct from full banking readiness.
-        return {"status": "alive", "service": "gateway", "banking_ready": False}
+        # Process liveness only: do not expose a stale banking readiness flag.
+        return {"status": "alive", "service": "gateway"}
 
     @app.get("/ready")
-    def ready():
+    async def ready():
         router: ReplicaRouter | None = app.state.router
         counts = ({name: router.available(name) for name in router.replicas}
                   if router is not None else {shard.name: 0 for shard in mapping.shards})
-        good = all(value > 0 for value in counts.values())
-        body = {"status": "ready" if good else "unavailable", "service": "gateway",
-                "routing_ready": good, "banking_ready": False, "healthy_replicas": counts}
-        return JSONResponse(status_code=200 if good else 503, content=body)
+        routing_ready = all(value > 0 for value in counts.values())
+        coordinator_ready = False
+        client: httpx.AsyncClient | None = app.state.coordinator_client
+        if client is not None:
+            try:
+                endpoint = os.getenv("COORDINATOR_URL", "http://coordinator:8000").rstrip("/")
+                response = await client.get(endpoint + "/health", timeout=2.0)
+                if response.status_code == 200:
+                    payload = response.json()
+                    coordinator_ready = (
+                        isinstance(payload, dict)
+                        and payload.get("status") == "alive"
+                        and payload.get("service") == "coordinator"
+                        and payload.get("transactions_ready") is True
+                    )
+            except (httpx.HTTPError, ValueError, TypeError):
+                # A failed dependency probe must never report fake readiness.
+                pass
+        banking_ready = routing_ready and coordinator_ready
+        body = {"status": "ready" if banking_ready else "unavailable",
+                "service": "gateway", "routing_ready": routing_ready,
+                "coordinator_ready": coordinator_ready, "banking_ready": banking_ready,
+                "healthy_replicas": counts}
+        return JSONResponse(status_code=200 if banking_ready else 503, content=body)
 
     async def balance(account_id: str):
         try:

@@ -15,7 +15,7 @@ def main() -> None:
     with urllib.request.urlopen(base + "/health", timeout=5) as response:
         health = json.load(response)
         assert response.status == 200
-        assert health == {"status": "alive", "service": "gateway", "banking_ready": False}
+        assert health == {"status": "alive", "service": "gateway"}
     request = urllib.request.Request(
         base + "/api/v1/operations",
         data=b'{"action":"balance","account":"A0001"}',

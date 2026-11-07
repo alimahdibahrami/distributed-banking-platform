@@ -19,7 +19,7 @@ def invoke(app, method, path, **kwargs):
 def test_gateway_liveness_and_no_fake_success():
     app = gateway_app()
     assert invoke(app, "GET", "/health").json() == {
-        "status": "alive", "service": "gateway", "banking_ready": False
+        "status": "alive", "service": "gateway"
     }
     response = invoke(app, "POST", "/api/v1/operations", json={"action": "withdraw", "account": "A0001", "amount": 1})
     assert response.status_code == 503  # App lifespan not started, not a fake success.
@@ -32,7 +32,7 @@ def test_replica_identity_and_no_fake_success(shard, replica):
     result = invoke(app, "GET", "/health")
     assert result.status_code == 200
     assert result.json() == {"status": "alive", "service": "bank", "shard": shard,
-                             "replica": replica, "banking_ready": False}
+                             "replica": replica}
     result = invoke(app, "POST", "/internal/operations")
     assert result.status_code == 400  # Missing JSON body is invalid.
 

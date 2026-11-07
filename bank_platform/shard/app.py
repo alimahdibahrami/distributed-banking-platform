@@ -32,9 +32,9 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict:
-        # Liveness intentionally does not imply banking functionality.
+        # Liveness is independent of storage and banking availability.
         return {"status": "alive", "service": "bank", "shard": shard,
-                "replica": replica, "banking_ready": False}
+                "replica": replica}
 
     @app.get("/ready")
     def ready():
@@ -44,10 +44,10 @@ def create_app(
             LOGGER.exception("Storage readiness failed on replica %s", replica)
             return JSONResponse(status_code=503, content={
                 "status": "unavailable", "shard": shard, "replica": replica,
-                "storage_ready": False,
+                "storage_ready": False, "banking_ready": False,
             })
         return {"status": "ready", "shard": shard, "replica": replica,
-                "storage_ready": True, "banking_ready": False}
+                "storage_ready": True, "banking_ready": True}
 
     @app.get("/internal/accounts/{account_id}")
     def read_account(account_id: str):

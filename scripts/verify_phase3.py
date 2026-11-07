@@ -75,7 +75,7 @@ def check_base() -> None:
     print("Checking Gateway health and readiness...")
     code, health = fetch("/health")
     assert code == 200 and health.get("status") == "alive", health
-    assert health.get("banking_ready") is False, "Writes must not be marked ready in phase 3"
+    assert "banking_ready" not in health, "Liveness must not claim banking readiness"
     wait_until(lambda: ready_counts() == {"A": 2, "B": 2}, description="all 4 replicas ready")
 
     print("Checking owner routing and per-shard Round Robin under parallel reads...")

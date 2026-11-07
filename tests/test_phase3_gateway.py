@@ -14,8 +14,12 @@ class FakeReplicas:
         self.fail_reads = set()
         self.requests = []
         self.wrong_identity = set()
+        self.coordinator_ready = True
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "coordinator" and request.url.path == "/health":
+            return httpx.Response(200, json={"status": "alive", "service": "coordinator",
+                                             "transactions_ready": self.coordinator_ready})
         name = request.url.host.replace("bank_", "").upper()
         shard = name[0]
         self.requests.append((name, request.url.path))
@@ -63,10 +67,10 @@ def test_round_robin_is_independent_per_shard_and_logged(caplog):
         r = await client.get("/ready")
         assert r.status_code == 200
         assert r.json() == {"status": "ready", "service": "gateway",
-                            "routing_ready": True, "banking_ready": False,
-                            "healthy_replicas": {"A": 2, "B": 2}}
+                            "routing_ready": True, "coordinator_ready": True,
+                            "banking_ready": True, "healthy_replicas": {"A": 2, "B": 2}}
         r = await client.get("/health")
-        assert r.json()["banking_ready"] is False
+        assert r.json() == {"status": "alive", "service": "gateway"}
     run(check)
 
 

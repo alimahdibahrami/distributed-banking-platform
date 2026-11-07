@@ -50,7 +50,7 @@ def test_phase2_storage_is_read_only_and_shard_owned(shard, replica, account, ba
     app = create_app(shard, replica, store)
     assert get(app, "/ready").json() == {
         "status": "ready", "shard": shard, "replica": replica,
-        "storage_ready": True, "banking_ready": False,
+        "storage_ready": True, "banking_ready": True,
     }
     result = get(app, f"/internal/accounts/{account}")
     assert result.status_code == 200
@@ -81,6 +81,7 @@ def test_replica_cannot_fake_readiness_when_db_down():
     ready = get(app, "/ready")
     assert ready.status_code == 503
     assert ready.json()["storage_ready"] is False
+    assert ready.json()["banking_ready"] is False
     assert get(app, "/internal/accounts/A0500").status_code == 503
 
 
