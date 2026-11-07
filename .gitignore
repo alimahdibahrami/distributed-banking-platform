@@ -12,3 +12,6 @@ logs/
 *.log
 *.zip
 .DS_Store
+
+# Generated live experiment artifacts (may contain transaction IDs)
+evidence/

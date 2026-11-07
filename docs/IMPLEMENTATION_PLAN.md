@@ -43,20 +43,20 @@ No GitHub Issues. One or more scoped commits per phase; each phase is accepted o
 - Transfer within one shard uses a single atomic transaction.
 - Gate accepted on VPS: 60 concurrent writes + 60 same-shard transfers per shard; no lost updates; all balances restored.
 
-## Phase 5 - Real cross-shard 2PC (local implementation; VPS acceptance pending)
+## Phase 5 - Real cross-shard 2PC (accepted on VPS)
 
 - Durable unique transaction IDs and coordinator states.
 - PostgreSQL PREPARE TRANSACTION (not two sequential committed updates).
 - Record COMMIT/ABORT decision before notifications; safely repeat decisions.
 - Never acknowledge success without all participant COMMIT acknowledgements.
-- Gate: cross-shard transfer preserves sums and correctly aborts on rejected vote.
+- Gate accepted on VPS: cross-shard transfer conserved sums, durable ABORT after rejected vote, idempotent replay, zero prepared leftovers.
 
-## Phase 6 - Crash recovery
+## Phase 6 - Crash recovery (accepted on VPS)
 
 - Coordinator durable journal, unresolved status lookup (PENDING/UNKNOWN).
 - Recover from failed vote (A), stop after PREPARE (B), stop after durable COMMIT (C).
 - Preserve a durable COMMIT across temporary participant outage.
-- Gate: deterministic process-stop/restart proofs for A/B/C.
+- Gate accepted on VPS: three deterministic Coordinator crashes (`after-first-prepare`, `after-durable-commit`, `after-first-ack`) and recovery with original balances restored, all PASS.
 
 ## Phase 7 - Mandatory verification
 
@@ -96,5 +96,13 @@ Progress accounting: completion is acceptance-gate based, not lines of code.
 
 Implemented: startup replay, periodic reconciliation, prepared-transaction
 ABORT fencing, deterministic coordinator-only fault injection, Phase 6 live
-verification, and regression tests. Pending: VPS acceptance of three injected
-crash points (`after-first-prepare`, `after-durable-commit`, `after-first-ack`).
+verification, and regression tests. VPS accepted: all three injected crash points (`after-first-prepare`,
+`after-durable-commit`, `after-first-ack`) completed and passed.
+
+
+### Phase 7 implementation status
+
+Implemented: 7-case reproducible VPS harness (`scripts/verify_phase7.py`),
+separate overlapping-account 2PC workload (`verify_phase7_concurrent_2pc.py`),
+per-experiment log/JSON evidence, and explicit disruption opt-in.
+Pending: **run all seven on the actual VPS and inspect evidence**.

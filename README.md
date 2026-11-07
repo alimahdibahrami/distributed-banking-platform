@@ -199,3 +199,21 @@ python3 scripts/verify_phase6.py --crash-tests
 This is disruptive to the Coordinator and uses separate fixture accounts.
 Never reset PostgreSQL or Coordinator volumes after an uncertain transfer;
 query the original transaction ID instead. See `docs/PHASE6_ACCEPTANCE.md`.
+
+
+## Phase 7 - Seven required instructor experiments (not VPS accepted yet)
+
+The seven cases in assignment §6 are implemented as a reproducible evidence
+suite (see `docs/PHASE7_ACCEPTANCE.md`). Run from the VPS project directory:
+
+```bash
+python3 scripts/verify_phase7.py --list
+python3 scripts/verify_phase7.py --experiment 7
+python3 scripts/verify_phase7.py --all --allow-disruptive
+```
+
+The last command deliberately stops and restores only `bank_a1` and
+`coordinator`, never the PostgreSQL data volumes or Assignment 1. It creates
+`evidence/phase7/<UTC-run-id>/summary.json` and logs for all seven cases.
+The new overlapping cross-shard concurrency experiment is safely
+balance-neutral on success, and stops on any uncertain transaction.
