@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import httpx
 
 from bank_platform.common.shard_map import Shard, ShardMap
+from bank_platform.migration.shard_cohort import cohort_required, replica_proves_epoch
 
 LOGGER = logging.getLogger("uvicorn.error")  # Visible in Docker/Uvicorn logs
 
@@ -27,6 +28,7 @@ class Replica:
 class ReplicaRouter:
     def __init__(self, mapping: ShardMap, client: httpx.AsyncClient):
         self.client = client
+        self.routing_epoch = mapping.version
         self.replicas: dict[str, tuple[Replica, ...]] = {
             shard.name: tuple(
                 Replica(shard.name, f"{shard.name}{index}", endpoint.rstrip("/"))
@@ -51,6 +53,9 @@ class ReplicaRouter:
             if response.status_code != 200:
                 return False
             payload = response.json()
+            if cohort_required():
+                return replica_proves_epoch(payload, replica.shard,
+                                            replica.name, self.routing_epoch)
             return (isinstance(payload, dict) and payload.get("status") == "ready"
                     and payload.get("storage_ready") is True
                     and payload.get("shard") == replica.shard
@@ -92,9 +97,12 @@ class ReplicaRouter:
         while (replica := self.next_replica(shard, attempted)) is not None:
             attempted.add(replica.name)
             try:
-                response = await self.client.get(
-                    f"{replica.url}/internal/accounts/{account}",
-                )
+                url = f"{replica.url}/internal/accounts/{account}"
+                if cohort_required():
+                    response = await self.client.get(
+                        url, params={"owner_epoch": self.routing_epoch})
+                else:
+                    response = await self.client.get(url)
                 if response.status_code == 404:
                     # An absent account is not evidence of a dead replica.
                     return {"not_found": True}

@@ -1,0 +1,9 @@
+# Never commit secrets or mutable lab state.
+.env
+publish_availability.json
+publish_runtime.log
+__pycache__/
+.pytest_cache/
+*.pyc
+*.sqlite3
+*.sqlite3-*

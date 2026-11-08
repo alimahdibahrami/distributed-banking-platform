@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from bank_platform.common.shard_map import account_number
 from bank_platform.common.validation import BankingError, MAX_MONEY
+from bank_platform.migration.epoch import stale_epoch_error
+from bank_platform.migration.shard_cohort import cohort_required, configured_epoch
 
 
 @dataclass(frozen=True)
@@ -36,11 +38,24 @@ class ShardIdentityError(RuntimeError):
 
 class PostgresAccountStore:
     def __init__(self, shard_id: str, config: DbConfig | None = None):
-        if shard_id not in {"A", "B"}:
+        if shard_id not in {"A", "B", "C"}:
             raise ValueError("Unknown shard")
         self.shard_id = shard_id
         self.config = config or DbConfig.from_env()
-        self.first, self.last = (1, 1000) if shard_id == "A" else (1001, 2000)
+        defaults = {"A": (1, 1000), "B": (1001, 2000), "C": (1501, 2000)}
+        first, last = defaults[shard_id]
+        # B's new 1001..1500 identity is only valid after a controlled DB
+        # migration; an environment override alone never alters DB ownership.
+        self.first = int(os.getenv("BANK_ACCOUNT_FIRST", str(first)))
+        self.last = int(os.getenv("BANK_ACCOUNT_LAST", str(last)))
+        if (self.first, self.last) not in {(1, 1000), (1001, 2000), (1001, 1500), (1501, 2000)}:
+            raise ValueError("Unexpected shard range")
+        if shard_id == "A" and (self.first, self.last) != (1, 1000):
+            raise ValueError("Invalid shard A range")
+        if shard_id == "B" and (self.first, self.last) not in {(1001, 2000), (1001, 1500)}:
+            raise ValueError("Invalid shard B range")
+        if shard_id == "C" and (self.first, self.last) != (1501, 2000):
+            raise ValueError("Invalid shard C range")
 
     def owns(self, account_id: str) -> bool:
         number = account_number(account_id)
@@ -68,6 +83,71 @@ class PostgresAccountStore:
         ):
             raise ShardIdentityError(f"Database identity is not shard {self.shard_id}")
 
+    def _bind_owner_epoch(self, cursor, owner_epoch: int | None) -> None:
+        """Set transaction-local PostgreSQL owner context before any write.
+
+        The database trigger is authoritative. This method does not decide
+        account ownership or permit any bypass of that trigger.
+        """
+        if cohort_required():
+            self._assert_client_epoch(owner_epoch)
+        if owner_epoch is None:
+            return
+        if type(owner_epoch) is not int or owner_epoch < 1:
+            raise BankingError("INVALID_OWNER_EPOCH", "Positive integer required", 400)
+        cursor.execute("SELECT set_config('bank.owner_shard', %s, true)", (self.shard_id,))
+        cursor.execute("SELECT set_config('bank.owner_epoch', %s, true)", (str(owner_epoch),))
+
+    def _assert_client_epoch(self, owner_epoch: int | None) -> None:
+        # Legacy and epoch-less reads and writes must not reach a strict shard.
+        if type(owner_epoch) is not int or owner_epoch != configured_epoch():
+            raise BankingError('STALE_OWNER_EPOCH',
+                               'Shard routing epoch does not match the request', 409)
+
+    def _assert_moving_owner(self, cursor, account_id: str, epoch: int) -> None:
+        # PostgreSQL lock serializes reads with a concurrent fence flip.
+        if self.shard_id not in ('B', 'C') or not 'A1501' <= account_id <= 'A2000':
+            return
+        cursor.execute('''SELECT owner_shard,owner_epoch,fence_enabled
+            FROM bank_migration_fence WHERE singleton=1 FOR SHARE''')
+        row = cursor.fetchone()
+        if row is None:
+            raise ShardIdentityError('Migration fence missing on moving range')
+        physical_owner = str(row[0]).strip()
+        seen_epoch = int(row[1])
+        fenced = row[2] is True
+        if self.shard_id == 'B':
+            valid = (physical_owner, seen_epoch, fenced) == ('B', 1, False) and epoch == 1
+        else:
+            valid = (physical_owner, seen_epoch, fenced) == ('C', 2, True) and epoch == 2
+        if not valid:
+            raise BankingError('STALE_OWNER_EPOCH',
+                               'Read blocked by durable migration ownership fence', 409)
+
+    def route_proof(self, epoch: int) -> bool:
+        # DB-derived proof for strict deployment.
+
+
+        if not cohort_required():
+            return False
+        self._assert_client_epoch(epoch)
+        if self.shard_id == 'A':
+            return True
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._verify_identity(cursor)
+                cursor.execute('''SELECT owner_shard,owner_epoch,fence_enabled
+                    FROM bank_migration_fence WHERE singleton=1 FOR SHARE''')
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                observed = (str(row[0]).strip(), int(row[1]), row[2] is True)
+                expected = ({1: ('B', 1, False), 2: ('C', 2, True)}.get(epoch)
+                            if self.shard_id == 'B' else ('C', 2, True))
+                if self.shard_id == 'C' and epoch != 2:
+                    return False
+                return observed == expected
+
     def ready(self) -> bool:
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -78,18 +158,22 @@ class PostgresAccountStore:
                     raise ShardIdentityError("Account fixture is incomplete")
         return True
 
-    def read_account(self, account_id: str) -> int | None:
+    def read_account(self, account_id: str, *, owner_epoch: int | None = None) -> int | None:
+        if cohort_required():
+            self._assert_client_epoch(owner_epoch)
         if not self.owns(account_id):
             raise ShardIdentityError(f"Account does not belong to shard {self.shard_id}")
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._verify_identity(cursor)
+                if cohort_required():
+                    self._assert_moving_owner(cursor, account_id, owner_epoch)
                 cursor.execute("SELECT balance FROM accounts WHERE account_id = %s", (account_id,))
                 row = cursor.fetchone()
                 return int(row[0]) if row is not None else None
 
 
-    def mutate(self, action: str, account_id: str, amount: int) -> int:
+    def mutate(self, action: str, account_id: str, amount: int, *, owner_epoch: int | None = None) -> int:
         """One local ACID transaction, SERIALIZE same-account writes with row lock."""
         if action not in ("deposit", "withdraw"):
             raise ValueError("Unsupported mutation")
@@ -100,6 +184,7 @@ class PostgresAccountStore:
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._verify_identity(cursor)
+                self._bind_owner_epoch(cursor, owner_epoch)
                 cursor.execute("SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE", (account_id,))
                 row = cursor.fetchone()
                 if row is None:
@@ -113,7 +198,7 @@ class PostgresAccountStore:
                 cursor.execute("UPDATE accounts SET balance = %s WHERE account_id = %s", (new, account_id))
         return new
 
-    def transfer_local(self, source: str, destination: str, amount: int) -> tuple[int, int]:
+    def transfer_local(self, source: str, destination: str, amount: int, *, owner_epoch: int | None = None) -> tuple[int, int]:
         """Lock account rows in global order to avoid deadlocks across replicas."""
         if source == destination or not self.owns(source) or not self.owns(destination):
             raise ShardIdentityError("Transfer needs two distinct accounts owned by the same shard")
@@ -122,6 +207,7 @@ class PostgresAccountStore:
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._verify_identity(cursor)
+                self._bind_owner_epoch(cursor, owner_epoch)
                 balances = {}
                 for account in sorted((source, destination)):
                     cursor.execute("SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE", (account,))

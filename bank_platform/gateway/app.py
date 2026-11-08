@@ -15,6 +15,11 @@ from fastapi.responses import JSONResponse
 from bank_platform.common.shard_map import ShardMap, load_shard_map
 from bank_platform.common.validation import BankingError, validate_local_operation, validate_transfer
 from bank_platform.gateway.routing import ReplicaRouter, poll_health
+from bank_platform.migration.epoch import outgoing_epoch
+from bank_platform.migration.shard_cohort import assert_cohort_configuration
+from bank_platform.migration.routing_guard import (
+    assert_configuration, strict_routing, epoch_agrees, probe_coordinator_epoch,
+)
 
 DEFAULT_MAP_PATH = Path(__file__).resolve().parents[2] / "config" / "shard_map.json"
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +37,8 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     poll_interval: float | None = None,
 ) -> FastAPI:
+    assert_configuration()
+    assert_cohort_configuration()
     mapping = shard_map or load_shard_map(os.getenv("SHARD_MAP_FILE", str(DEFAULT_MAP_PATH)))
     interval = poll_interval if poll_interval is not None else float(os.getenv("GATEWAY_HEALTH_INTERVAL", "2"))
     if interval <= 0:
@@ -59,6 +66,19 @@ def create_app(
     app.state.router = None
     app.state.coordinator_client = None
 
+    def coordinator_url() -> str:
+        return os.getenv("COORDINATOR_URL", "http://coordinator:8000").rstrip("/")
+
+    async def guard_routing_epoch():
+        if not strict_routing():
+            return None
+        if not await probe_coordinator_epoch(
+            app.state.coordinator_client, coordinator_url(), mapping.version
+        ):
+            return error(503, "ROUTING_EPOCH_UNAVAILABLE",
+                         "Gateway and Coordinator have not confirmed the same routing epoch")
+        return None
+
     @app.get("/health")
     def health() -> dict:
         # Process liveness only: do not expose a stale banking readiness flag.
@@ -79,10 +99,13 @@ def create_app(
                 if response.status_code == 200:
                     payload = response.json()
                     coordinator_ready = (
-                        isinstance(payload, dict)
-                        and payload.get("status") == "alive"
-                        and payload.get("service") == "coordinator"
-                        and payload.get("transactions_ready") is True
+                        epoch_agrees(payload, mapping.version)
+                        if strict_routing() else (
+                            isinstance(payload, dict)
+                            and payload.get("status") == "alive"
+                            and payload.get("service") == "coordinator"
+                            and payload.get("transactions_ready") is True
+                        )
                     )
             except (httpx.HTTPError, ValueError, TypeError):
                 # A failed dependency probe must never report fake readiness.
@@ -92,6 +115,9 @@ def create_app(
                 "service": "gateway", "routing_ready": routing_ready,
                 "coordinator_ready": coordinator_ready, "banking_ready": banking_ready,
                 "healthy_replicas": counts}
+        if strict_routing():
+            body["routing_epoch"] = mapping.version
+            body["epoch_coherent"] = coordinator_ready
         return JSONResponse(status_code=200 if banking_ready else 503, content=body)
 
     async def balance(account_id: str):
@@ -99,6 +125,9 @@ def create_app(
             shard = mapping.owner_for(account_id)
         except ValueError:
             return error(400, "INVALID_ACCOUNT", "Account ID must be A0001..A2000")
+        guard = await guard_routing_epoch()
+        if guard is not None:
+            return guard
         router: ReplicaRouter | None = app.state.router
         if router is None:
             return error(503, "GATEWAY_STARTING", "Gateway has not completed startup")
@@ -151,7 +180,11 @@ def create_app(
                         return error(503, "GATEWAY_STARTING", "Gateway has not completed startup")
                     # Caller can supply a stable UUIDv4 to safely repeat or query.
                     txid = raw.get('transaction_id') or str(uuid4())
-                    request_body = {**raw, 'transaction_id': txid}
+                    request_body = {**raw, 'transaction_id': txid,
+                                    **outgoing_epoch(mapping.version)}
+                    guard = await guard_routing_epoch()
+                    if guard is not None:
+                        return guard
                     try:
                         response = await client.post(
                             os.getenv('COORDINATOR_URL', 'http://coordinator:8000').rstrip('/') + '/internal/transactions',
@@ -191,10 +224,13 @@ def create_app(
             return error(exc.http_status, exc.code, exc.message)
         except ValueError:
             return error(400, "INVALID_ACCOUNT", "Account ID must be A0001..A2000")
+        guard = await guard_routing_epoch()
+        if guard is not None:
+            return guard
         router: ReplicaRouter | None = app.state.router
         if router is None:
             return error(503, "GATEWAY_STARTING", "Gateway has not completed startup")
-        result = await router.write_once(shard, path, raw)
+        result = await router.write_once(shard, path, {**raw, **outgoing_epoch(mapping.version)})
         if result is None:
             return error(503, "NO_HEALTHY_REPLICA", f"No healthy replica in shard {shard.name}")
         code, payload = result

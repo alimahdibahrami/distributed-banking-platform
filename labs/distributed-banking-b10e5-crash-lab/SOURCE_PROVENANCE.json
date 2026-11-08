@@ -1,0 +1,14 @@
+{
+  "baseline_commit": "f50ccbc",
+  "branch": "feature/bonus10e-source-foundation",
+  "purpose": "isolated integrated crash resume and controlled cutover availability proof",
+  "runtime_test_status": "NOT_EXECUTED: requires user VPS Docker/PostgreSQL",
+  "unit_contract_tests": "27 PASS",
+  "source": "Derived from verified 10E4D integrated lab with 10E4D bootstrap/import hotfixes",
+  "restrictions": [
+    "never changes port 8001",
+    "never changes existing 10E4D port 18081",
+    "never use compose down -v",
+    "no production DB connectivity"
+  ]
+}

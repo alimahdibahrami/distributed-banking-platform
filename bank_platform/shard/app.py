@@ -12,6 +12,10 @@ from bank_platform.common.shard_map import account_number
 from bank_platform.common.validation import BankingError, validate_local_operation, validate_transfer
 from bank_platform.shard.storage import PostgresAccountStore, ShardIdentityError
 from bank_platform.shard.twopc import Pg2pcParticipant, normalize_txid
+from bank_platform.migration.epoch import strip_internal_epoch, stale_epoch_error
+from bank_platform.migration.shard_cohort import (
+    assert_cohort_configuration, cohort_required, configured_epoch,
+)
 
 LOGGER = logging.getLogger("uvicorn.error")  # Visible in Docker/Uvicorn logs
 
@@ -23,8 +27,11 @@ def create_app(
 ) -> FastAPI:
     shard = shard_id or os.getenv("SHARD_ID")
     replica = replica_id or os.getenv("REPLICA_ID")
-    if shard not in ("A", "B") or replica not in (f"{shard}1", f"{shard}2"):
-        raise ValueError("Expected SHARD_ID=A/B and matching REPLICA_ID=A1/A2/B1/B2")
+    if shard not in ("A", "B", "C") or replica not in (f"{shard}1", f"{shard}2"):
+        raise ValueError("Expected A/B/C shard and matching replica")
+    if shard == "C" and os.getenv("BANK_ENABLE_SHARD_C", "0") != "1":
+        raise ValueError("Shard C must be explicitly enabled in an isolated deployment")
+    assert_cohort_configuration(bank=True)
     storage = store if store is not None else PostgresAccountStore(shard)
     app = FastAPI(title=f"Bank Replica {replica}", version="0.4.0")
     app.state.store = storage
@@ -40,18 +47,26 @@ def create_app(
     def ready():
         try:
             storage.ready()
+            if cohort_required():
+                epoch = configured_epoch()
+                if not storage.route_proof(epoch):
+                    raise ShardIdentityError('Shard DB routing epoch proof failed')
         except Exception:
             LOGGER.exception("Storage readiness failed on replica %s", replica)
             return JSONResponse(status_code=503, content={
                 "status": "unavailable", "shard": shard, "replica": replica,
                 "storage_ready": False, "banking_ready": False,
             })
-        return {"status": "ready", "shard": shard, "replica": replica,
+        body = {"status": "ready", "shard": shard, "replica": replica,
                 "storage_ready": True, "banking_ready": True}
+        if cohort_required():
+            body.update(routing_epoch=configured_epoch(), ownership_verified=True)
+        return body
 
     @app.get("/internal/accounts/{account_id}")
-    def read_account(account_id: str):
-        # Internal, read-only probe. Gateway does not yet expose balance lookup.
+    def read_account(account_id: str, owner_epoch: int | None = None):
+        # Read ownership must be checked under a PostgreSQL fence row lock.
+        # An old Gateway must never read B's stale copy after B -> C.
         try:
             account_number(account_id)
         except ValueError:
@@ -59,7 +74,10 @@ def create_app(
         if not storage.owns(account_id):
             return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
         try:
-            balance = storage.read_account(account_id)
+            balance = (storage.read_account(account_id, owner_epoch=owner_epoch)
+                       if cohort_required() else storage.read_account(account_id))
+        except BankingError as exc:
+            return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
         except Exception:
             LOGGER.exception("Read failed on replica %s", replica)
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
@@ -75,6 +93,7 @@ def create_app(
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "INVALID_REQUEST"})
         try:
+            body, owner_epoch = strip_internal_epoch(body)
             command = validate_local_operation(body)
             account_number(command.account)
         except BankingError as exc:
@@ -85,14 +104,20 @@ def create_app(
             return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
         try:
             if command.action == "balance":
-                value = storage.read_account(command.account)
+                value = (storage.read_account(command.account, owner_epoch=owner_epoch)
+                         if cohort_required() else storage.read_account(command.account))
                 if value is None:
                     return JSONResponse(status_code=404, content={"error": "ACCOUNT_NOT_FOUND"})
             else:
-                value = storage.mutate(command.action, command.account, command.amount)
+                value = (storage.mutate(command.action, command.account, command.amount,
+                                        owner_epoch=owner_epoch) if owner_epoch is not None
+                         else storage.mutate(command.action, command.account, command.amount))
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
-        except Exception:
+        except Exception as exc:
+            fenced = stale_epoch_error(exc)
+            if fenced:
+                return JSONResponse(status_code=fenced.http_status, content={"error": fenced.code})
             LOGGER.exception("Local banking operation failed on %s", replica)
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
         LOGGER.info("bank.operation action=%s account=%s shard=%s replica=%s", command.action, command.account, shard, replica)
@@ -106,16 +131,23 @@ def create_app(
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "INVALID_REQUEST"})
         try:
+            body, owner_epoch = strip_internal_epoch(body)
             command = validate_transfer(body)
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
         if not (storage.owns(command.source) and storage.owns(command.destination)):
             return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
         try:
-            from_balance, to_balance = storage.transfer_local(command.source, command.destination, command.amount)
+            from_balance, to_balance = (
+                storage.transfer_local(command.source, command.destination, command.amount,
+                                       owner_epoch=owner_epoch) if owner_epoch is not None
+                else storage.transfer_local(command.source, command.destination, command.amount))
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
-        except Exception:
+        except Exception as exc:
+            fenced = stale_epoch_error(exc)
+            if fenced:
+                return JSONResponse(status_code=fenced.http_status, content={"error": fenced.code})
             LOGGER.exception("Local transfer failed on %s", replica)
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
         LOGGER.info("bank.local_transfer from=%s to=%s amount=%d shard=%s replica=%s",
@@ -128,14 +160,20 @@ def create_app(
     async def tpc_prepare(request: Request):
         try:
             body = await request.json()
+            body, owner_epoch = strip_internal_epoch(body)
             if type(body) is not dict or set(body) != {'transaction_id', 'account', 'role', 'amount'}:
                 raise BankingError('INVALID_REQUEST', 'Incorrect 2PC prepare fields', 400)
+            if owner_epoch is not None:
+                body = {**body, 'owner_epoch': owner_epoch}
             state = await run_in_threadpool(tpc.prepare, **body)
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={'error': exc.code})
         except (ValueError, TypeError, ShardIdentityError):
             return JSONResponse(status_code=400, content={'error': 'INVALID_REQUEST_OR_OWNER'})
-        except Exception:
+        except Exception as exc:
+            fenced = stale_epoch_error(exc)
+            if fenced:
+                return JSONResponse(status_code=fenced.http_status, content={'error': fenced.code})
             LOGGER.exception('2PC prepare storage failure on %s', replica)
             return JSONResponse(status_code=503, content={'error': 'PREPARE_UNCERTAIN'})
         LOGGER.info('2pc.prepare txid=%s shard=%s replica=%s state=%s', body['transaction_id'], shard, replica, state)
