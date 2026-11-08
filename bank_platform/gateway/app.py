@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from bank_platform.common.shard_map import ShardMap, load_shard_map
 from bank_platform.common.validation import BankingError, validate_local_operation, validate_transfer
 from bank_platform.gateway.routing import ReplicaRouter, poll_health
+from bank_platform.migration.epoch import outgoing_epoch
 
 DEFAULT_MAP_PATH = Path(__file__).resolve().parents[2] / "config" / "shard_map.json"
 LOGGER = logging.getLogger(__name__)
@@ -194,7 +195,7 @@ def create_app(
         router: ReplicaRouter | None = app.state.router
         if router is None:
             return error(503, "GATEWAY_STARTING", "Gateway has not completed startup")
-        result = await router.write_once(shard, path, raw)
+        result = await router.write_once(shard, path, {**raw, **outgoing_epoch(mapping.version)})
         if result is None:
             return error(503, "NO_HEALTHY_REPLICA", f"No healthy replica in shard {shard.name}")
         code, payload = result

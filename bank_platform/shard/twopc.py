@@ -57,7 +57,8 @@ class Pg2pcParticipant:
         cursor.execute('SELECT 1 FROM tpc_participant_commits WHERE transaction_id = %s', (txid,))
         return cursor.fetchone() is not None
 
-    def prepare(self, *, transaction_id: str, account: str, role: str, amount: int) -> str:
+    def prepare(self, *, transaction_id: str, account: str, role: str,
+                amount: int, owner_epoch: int | None = None) -> str:
         txid = normalize_txid(transaction_id)
         if role not in ('debit', 'credit') or type(amount) is not int or not (1 <= amount <= MAX_MONEY):
             raise BankingError('INVALID_REQUEST', 'Invalid role or amount', 400)
@@ -91,6 +92,9 @@ class Pg2pcParticipant:
                     raise BankingError('TRANSACTION_ABORTED', 'A durable ABORT already fenced this ID', 409)
                 if self._exists(cursor, gid):
                     return 'PREPARED'
+                # Bound in the PREPARE transaction itself: COMMIT PREPARED later
+                # needs no epoch, preserving recovery of historical decisions.
+                self.storage._bind_owner_epoch(cursor, owner_epoch)
                 cursor.execute("SET LOCAL lock_timeout = '5s'")
                 cursor.execute('SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE', (account,))
                 row = cursor.fetchone()

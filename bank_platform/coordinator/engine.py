@@ -17,6 +17,7 @@ import httpx
 from bank_platform.common.shard_map import ShardMap
 from bank_platform.common.validation import BankingError, validate_transfer
 from bank_platform.shard.twopc import normalize_txid
+from bank_platform.migration.epoch import outgoing_epoch
 
 LOGGER = logging.getLogger('uvicorn.error')
 
@@ -187,9 +188,11 @@ class CoordinatorEngine:
         except (httpx.HTTPError, ValueError):
             return None
 
-    async def _prepare(self, shard: str, txid: str, account: str, role: str, amount: int) -> tuple[bool, str]:
+    async def _prepare(self, shard: str, txid: str, account: str, role: str, amount: int,
+                       *, owner_epoch: int = 1) -> tuple[bool, str]:
         outcome = await self._participant(shard, 'POST', '/internal/tpc/prepare', {
             'transaction_id': txid, 'account': account, 'role': role, 'amount': amount,
+            **outgoing_epoch(owner_epoch),
         })
         if outcome is None:
             return False, 'UNCERTAIN_PREPARE'
@@ -293,7 +296,9 @@ class CoordinatorEngine:
                 # transfers acquiring shard locks in a cyclic order.
                 yes, reason = True, ''
                 for index, (owner, account, role) in enumerate(legs):
-                    yes, reason = await self._prepare(owner, txid, account, role, command.amount)
+                    yes, reason = await self._prepare(
+                        owner, txid, account, role, command.amount,
+                        owner_epoch=record['owner_epoch'])
                     if not yes:
                         break
                     if index == 0:

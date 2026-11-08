@@ -12,6 +12,7 @@ from bank_platform.common.shard_map import account_number
 from bank_platform.common.validation import BankingError, validate_local_operation, validate_transfer
 from bank_platform.shard.storage import PostgresAccountStore, ShardIdentityError
 from bank_platform.shard.twopc import Pg2pcParticipant, normalize_txid
+from bank_platform.migration.epoch import strip_internal_epoch, stale_epoch_error
 
 LOGGER = logging.getLogger("uvicorn.error")  # Visible in Docker/Uvicorn logs
 
@@ -77,6 +78,7 @@ def create_app(
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "INVALID_REQUEST"})
         try:
+            body, owner_epoch = strip_internal_epoch(body)
             command = validate_local_operation(body)
             account_number(command.account)
         except BankingError as exc:
@@ -91,10 +93,15 @@ def create_app(
                 if value is None:
                     return JSONResponse(status_code=404, content={"error": "ACCOUNT_NOT_FOUND"})
             else:
-                value = storage.mutate(command.action, command.account, command.amount)
+                value = (storage.mutate(command.action, command.account, command.amount,
+                                        owner_epoch=owner_epoch) if owner_epoch is not None
+                         else storage.mutate(command.action, command.account, command.amount))
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
-        except Exception:
+        except Exception as exc:
+            fenced = stale_epoch_error(exc)
+            if fenced:
+                return JSONResponse(status_code=fenced.http_status, content={"error": fenced.code})
             LOGGER.exception("Local banking operation failed on %s", replica)
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
         LOGGER.info("bank.operation action=%s account=%s shard=%s replica=%s", command.action, command.account, shard, replica)
@@ -108,16 +115,23 @@ def create_app(
         except ValueError:
             return JSONResponse(status_code=400, content={"error": "INVALID_REQUEST"})
         try:
+            body, owner_epoch = strip_internal_epoch(body)
             command = validate_transfer(body)
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
         if not (storage.owns(command.source) and storage.owns(command.destination)):
             return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
         try:
-            from_balance, to_balance = storage.transfer_local(command.source, command.destination, command.amount)
+            from_balance, to_balance = (
+                storage.transfer_local(command.source, command.destination, command.amount,
+                                       owner_epoch=owner_epoch) if owner_epoch is not None
+                else storage.transfer_local(command.source, command.destination, command.amount))
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
-        except Exception:
+        except Exception as exc:
+            fenced = stale_epoch_error(exc)
+            if fenced:
+                return JSONResponse(status_code=fenced.http_status, content={"error": fenced.code})
             LOGGER.exception("Local transfer failed on %s", replica)
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
         LOGGER.info("bank.local_transfer from=%s to=%s amount=%d shard=%s replica=%s",
@@ -130,14 +144,20 @@ def create_app(
     async def tpc_prepare(request: Request):
         try:
             body = await request.json()
+            body, owner_epoch = strip_internal_epoch(body)
             if type(body) is not dict or set(body) != {'transaction_id', 'account', 'role', 'amount'}:
                 raise BankingError('INVALID_REQUEST', 'Incorrect 2PC prepare fields', 400)
+            if owner_epoch is not None:
+                body = {**body, 'owner_epoch': owner_epoch}
             state = await run_in_threadpool(tpc.prepare, **body)
         except BankingError as exc:
             return JSONResponse(status_code=exc.http_status, content={'error': exc.code})
         except (ValueError, TypeError, ShardIdentityError):
             return JSONResponse(status_code=400, content={'error': 'INVALID_REQUEST_OR_OWNER'})
-        except Exception:
+        except Exception as exc:
+            fenced = stale_epoch_error(exc)
+            if fenced:
+                return JSONResponse(status_code=fenced.http_status, content={'error': fenced.code})
             LOGGER.exception('2PC prepare storage failure on %s', replica)
             return JSONResponse(status_code=503, content={'error': 'PREPARE_UNCERTAIN'})
         LOGGER.info('2pc.prepare txid=%s shard=%s replica=%s state=%s', body['transaction_id'], shard, replica, state)

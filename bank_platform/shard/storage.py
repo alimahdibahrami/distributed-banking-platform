@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from bank_platform.common.shard_map import account_number
 from bank_platform.common.validation import BankingError, MAX_MONEY
+from bank_platform.migration.epoch import stale_epoch_error
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,19 @@ class PostgresAccountStore:
         ):
             raise ShardIdentityError(f"Database identity is not shard {self.shard_id}")
 
+    def _bind_owner_epoch(self, cursor, owner_epoch: int | None) -> None:
+        """Set transaction-local PostgreSQL owner context before any write.
+
+        The database trigger is authoritative. This method does not decide
+        account ownership or permit any bypass of that trigger.
+        """
+        if owner_epoch is None:
+            return
+        if type(owner_epoch) is not int or owner_epoch < 1:
+            raise BankingError("INVALID_OWNER_EPOCH", "Positive integer required", 400)
+        cursor.execute("SELECT set_config('bank.owner_shard', %s, true)", (self.shard_id,))
+        cursor.execute("SELECT set_config('bank.owner_epoch', %s, true)", (str(owner_epoch),))
+
     def ready(self) -> bool:
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -102,7 +116,7 @@ class PostgresAccountStore:
                 return int(row[0]) if row is not None else None
 
 
-    def mutate(self, action: str, account_id: str, amount: int) -> int:
+    def mutate(self, action: str, account_id: str, amount: int, *, owner_epoch: int | None = None) -> int:
         """One local ACID transaction, SERIALIZE same-account writes with row lock."""
         if action not in ("deposit", "withdraw"):
             raise ValueError("Unsupported mutation")
@@ -113,6 +127,7 @@ class PostgresAccountStore:
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._verify_identity(cursor)
+                self._bind_owner_epoch(cursor, owner_epoch)
                 cursor.execute("SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE", (account_id,))
                 row = cursor.fetchone()
                 if row is None:
@@ -126,7 +141,7 @@ class PostgresAccountStore:
                 cursor.execute("UPDATE accounts SET balance = %s WHERE account_id = %s", (new, account_id))
         return new
 
-    def transfer_local(self, source: str, destination: str, amount: int) -> tuple[int, int]:
+    def transfer_local(self, source: str, destination: str, amount: int, *, owner_epoch: int | None = None) -> tuple[int, int]:
         """Lock account rows in global order to avoid deadlocks across replicas."""
         if source == destination or not self.owns(source) or not self.owns(destination):
             raise ShardIdentityError("Transfer needs two distinct accounts owned by the same shard")
@@ -135,6 +150,7 @@ class PostgresAccountStore:
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._verify_identity(cursor)
+                self._bind_owner_epoch(cursor, owner_epoch)
                 balances = {}
                 for account in sorted((source, destination)):
                     cursor.execute("SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE", (account,))
