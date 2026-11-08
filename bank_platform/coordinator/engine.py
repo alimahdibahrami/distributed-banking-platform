@@ -17,6 +17,7 @@ import httpx
 from bank_platform.common.shard_map import ShardMap
 from bank_platform.common.validation import BankingError, validate_transfer
 from bank_platform.shard.twopc import normalize_txid
+from bank_platform.migration.shard_cohort import cohort_required, replica_proves_epoch
 from bank_platform.migration.epoch import outgoing_epoch, strip_internal_epoch
 from bank_platform.migration.routing_guard import strict_routing
 
@@ -170,7 +171,15 @@ class CoordinatorEngine:
             try:
                 ready = await self.client.get(endpoint.rstrip('/') + '/ready')
                 body = ready.json()
-                if ready.status_code == 200 and body.get('shard') == shard and body.get('storage_ready') is True:
+                if ready.status_code != 200 or not isinstance(body, dict):
+                    continue
+                if cohort_required():
+                    replica = shard + str(group.index(endpoint) + 1)
+                    healthy = replica_proves_epoch(body, shard, replica, self.mapping.version)
+                else:
+                    healthy = (body.get('shard') == shard
+                               and body.get('storage_ready') is True)
+                if healthy:
                     selected = endpoint.rstrip('/')
                     break
             except (httpx.HTTPError, ValueError):

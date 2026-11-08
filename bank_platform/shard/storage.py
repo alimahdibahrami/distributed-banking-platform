@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from bank_platform.common.shard_map import account_number
 from bank_platform.common.validation import BankingError, MAX_MONEY
 from bank_platform.migration.epoch import stale_epoch_error
+from bank_platform.migration.shard_cohort import cohort_required, configured_epoch
 
 
 @dataclass(frozen=True)
@@ -88,12 +89,64 @@ class PostgresAccountStore:
         The database trigger is authoritative. This method does not decide
         account ownership or permit any bypass of that trigger.
         """
+        if cohort_required():
+            self._assert_client_epoch(owner_epoch)
         if owner_epoch is None:
             return
         if type(owner_epoch) is not int or owner_epoch < 1:
             raise BankingError("INVALID_OWNER_EPOCH", "Positive integer required", 400)
         cursor.execute("SELECT set_config('bank.owner_shard', %s, true)", (self.shard_id,))
         cursor.execute("SELECT set_config('bank.owner_epoch', %s, true)", (str(owner_epoch),))
+
+    def _assert_client_epoch(self, owner_epoch: int | None) -> None:
+        # Legacy and epoch-less reads and writes must not reach a strict shard.
+        if type(owner_epoch) is not int or owner_epoch != configured_epoch():
+            raise BankingError('STALE_OWNER_EPOCH',
+                               'Shard routing epoch does not match the request', 409)
+
+    def _assert_moving_owner(self, cursor, account_id: str, epoch: int) -> None:
+        # PostgreSQL lock serializes reads with a concurrent fence flip.
+        if self.shard_id not in ('B', 'C') or not 'A1501' <= account_id <= 'A2000':
+            return
+        cursor.execute('''SELECT owner_shard,owner_epoch,fence_enabled
+            FROM bank_migration_fence WHERE singleton=1 FOR SHARE''')
+        row = cursor.fetchone()
+        if row is None:
+            raise ShardIdentityError('Migration fence missing on moving range')
+        physical_owner = str(row[0]).strip()
+        seen_epoch = int(row[1])
+        fenced = row[2] is True
+        if self.shard_id == 'B':
+            valid = (physical_owner, seen_epoch, fenced) == ('B', 1, False) and epoch == 1
+        else:
+            valid = (physical_owner, seen_epoch, fenced) == ('C', 2, True) and epoch == 2
+        if not valid:
+            raise BankingError('STALE_OWNER_EPOCH',
+                               'Read blocked by durable migration ownership fence', 409)
+
+    def route_proof(self, epoch: int) -> bool:
+        # DB-derived proof for strict deployment.
+
+
+        if not cohort_required():
+            return False
+        self._assert_client_epoch(epoch)
+        if self.shard_id == 'A':
+            return True
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._verify_identity(cursor)
+                cursor.execute('''SELECT owner_shard,owner_epoch,fence_enabled
+                    FROM bank_migration_fence WHERE singleton=1 FOR SHARE''')
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                observed = (str(row[0]).strip(), int(row[1]), row[2] is True)
+                expected = ({1: ('B', 1, False), 2: ('C', 2, True)}.get(epoch)
+                            if self.shard_id == 'B' else ('C', 2, True))
+                if self.shard_id == 'C' and epoch != 2:
+                    return False
+                return observed == expected
 
     def ready(self) -> bool:
         with self._connect() as connection:
@@ -105,12 +158,16 @@ class PostgresAccountStore:
                     raise ShardIdentityError("Account fixture is incomplete")
         return True
 
-    def read_account(self, account_id: str) -> int | None:
+    def read_account(self, account_id: str, *, owner_epoch: int | None = None) -> int | None:
+        if cohort_required():
+            self._assert_client_epoch(owner_epoch)
         if not self.owns(account_id):
             raise ShardIdentityError(f"Account does not belong to shard {self.shard_id}")
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._verify_identity(cursor)
+                if cohort_required():
+                    self._assert_moving_owner(cursor, account_id, owner_epoch)
                 cursor.execute("SELECT balance FROM accounts WHERE account_id = %s", (account_id,))
                 row = cursor.fetchone()
                 return int(row[0]) if row is not None else None

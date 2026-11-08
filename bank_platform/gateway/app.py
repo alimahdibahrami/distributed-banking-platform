@@ -16,6 +16,7 @@ from bank_platform.common.shard_map import ShardMap, load_shard_map
 from bank_platform.common.validation import BankingError, validate_local_operation, validate_transfer
 from bank_platform.gateway.routing import ReplicaRouter, poll_health
 from bank_platform.migration.epoch import outgoing_epoch
+from bank_platform.migration.shard_cohort import assert_cohort_configuration
 from bank_platform.migration.routing_guard import (
     assert_configuration, strict_routing, epoch_agrees, probe_coordinator_epoch,
 )
@@ -37,6 +38,7 @@ def create_app(
     poll_interval: float | None = None,
 ) -> FastAPI:
     assert_configuration()
+    assert_cohort_configuration()
     mapping = shard_map or load_shard_map(os.getenv("SHARD_MAP_FILE", str(DEFAULT_MAP_PATH)))
     interval = poll_interval if poll_interval is not None else float(os.getenv("GATEWAY_HEALTH_INTERVAL", "2"))
     if interval <= 0:

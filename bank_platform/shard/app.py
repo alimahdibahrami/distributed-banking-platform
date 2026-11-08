@@ -13,6 +13,9 @@ from bank_platform.common.validation import BankingError, validate_local_operati
 from bank_platform.shard.storage import PostgresAccountStore, ShardIdentityError
 from bank_platform.shard.twopc import Pg2pcParticipant, normalize_txid
 from bank_platform.migration.epoch import strip_internal_epoch, stale_epoch_error
+from bank_platform.migration.shard_cohort import (
+    assert_cohort_configuration, cohort_required, configured_epoch,
+)
 
 LOGGER = logging.getLogger("uvicorn.error")  # Visible in Docker/Uvicorn logs
 
@@ -28,6 +31,7 @@ def create_app(
         raise ValueError("Expected A/B/C shard and matching replica")
     if shard == "C" and os.getenv("BANK_ENABLE_SHARD_C", "0") != "1":
         raise ValueError("Shard C must be explicitly enabled in an isolated deployment")
+    assert_cohort_configuration(bank=True)
     storage = store if store is not None else PostgresAccountStore(shard)
     app = FastAPI(title=f"Bank Replica {replica}", version="0.4.0")
     app.state.store = storage
@@ -43,18 +47,26 @@ def create_app(
     def ready():
         try:
             storage.ready()
+            if cohort_required():
+                epoch = configured_epoch()
+                if not storage.route_proof(epoch):
+                    raise ShardIdentityError('Shard DB routing epoch proof failed')
         except Exception:
             LOGGER.exception("Storage readiness failed on replica %s", replica)
             return JSONResponse(status_code=503, content={
                 "status": "unavailable", "shard": shard, "replica": replica,
                 "storage_ready": False, "banking_ready": False,
             })
-        return {"status": "ready", "shard": shard, "replica": replica,
+        body = {"status": "ready", "shard": shard, "replica": replica,
                 "storage_ready": True, "banking_ready": True}
+        if cohort_required():
+            body.update(routing_epoch=configured_epoch(), ownership_verified=True)
+        return body
 
     @app.get("/internal/accounts/{account_id}")
-    def read_account(account_id: str):
-        # Internal, read-only probe. Gateway does not yet expose balance lookup.
+    def read_account(account_id: str, owner_epoch: int | None = None):
+        # Read ownership must be checked under a PostgreSQL fence row lock.
+        # An old Gateway must never read B's stale copy after B -> C.
         try:
             account_number(account_id)
         except ValueError:
@@ -62,7 +74,10 @@ def create_app(
         if not storage.owns(account_id):
             return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
         try:
-            balance = storage.read_account(account_id)
+            balance = (storage.read_account(account_id, owner_epoch=owner_epoch)
+                       if cohort_required() else storage.read_account(account_id))
+        except BankingError as exc:
+            return JSONResponse(status_code=exc.http_status, content={"error": exc.code})
         except Exception:
             LOGGER.exception("Read failed on replica %s", replica)
             return JSONResponse(status_code=503, content={"error": "STORAGE_UNAVAILABLE"})
@@ -89,7 +104,8 @@ def create_app(
             return JSONResponse(status_code=409, content={"error": "WRONG_SHARD"})
         try:
             if command.action == "balance":
-                value = storage.read_account(command.account)
+                value = (storage.read_account(command.account, owner_epoch=owner_epoch)
+                         if cohort_required() else storage.read_account(command.account))
                 if value is None:
                     return JSONResponse(status_code=404, content={"error": "ACCOUNT_NOT_FOUND"})
             else:

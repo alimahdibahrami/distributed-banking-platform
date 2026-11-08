@@ -15,6 +15,7 @@ from bank_platform.common.validation import BankingError
 from bank_platform.coordinator.engine import CoordinatorEngine, DecisionJournal
 from bank_platform.shard.twopc import normalize_txid
 from bank_platform.migration.routing_guard import assert_configuration
+from bank_platform.migration.shard_cohort import assert_cohort_configuration
 
 MAP = Path(__file__).resolve().parents[2] / 'config' / 'shard_map.json'
 
@@ -22,6 +23,7 @@ MAP = Path(__file__).resolve().parents[2] / 'config' / 'shard_map.json'
 def create_app(*, journal: DecisionJournal | None = None,
                transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     assert_configuration()
+    assert_cohort_configuration()
     db = journal or DecisionJournal(os.getenv('COORDINATOR_DB_PATH', '/app/state/coordinator.sqlite3'))
 
     @asynccontextmanager
