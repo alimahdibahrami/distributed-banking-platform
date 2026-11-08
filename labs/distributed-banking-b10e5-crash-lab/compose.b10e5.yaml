@@ -1,0 +1,268 @@
+name: distributed-banking-b10e5-crash
+
+x-app: &app
+  image: ${LAB_APP_IMAGE:-distributed-banking-platform:phase8a-20261107}
+  init: true
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,nosuid,noexec,size=16m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  volumes:
+    - ./bank_platform:/app/bank_platform:ro
+    - ./config:/app/config:ro
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).close()"]
+    interval: 10s
+    timeout: 4s
+    retries: 10
+    start_period: 15s
+
+x-bank-epoch: &bank-epoch
+  BANK_EPOCH_PROPAGATION: "1"
+  BANK_REQUIRE_ROUTING_EPOCH: "1"
+  BANK_REQUIRE_SHARD_COHORT: "1"
+  BANK_ROUTING_EPOCH: ${LAB_ROUTING_EPOCH:-1}
+
+x-bank-command: &bank-command ["python", "-m", "uvicorn", "bank_platform.shard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+services:
+  shard_a_db:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    restart: "no"
+    environment:
+      POSTGRES_USER: bank
+      POSTGRES_DB: b10e5_a
+      POSTGRES_PASSWORD: ${LAB_A_PASSWORD:?Set LAB_A_PASSWORD}
+    volumes: [a_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank -d b10e5_a"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  shard_b_db:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    restart: "no"
+    environment:
+      POSTGRES_USER: bank
+      POSTGRES_DB: b10e5_b
+      POSTGRES_PASSWORD: ${LAB_B_PASSWORD:?Set LAB_B_PASSWORD}
+    volumes: [b_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank -d b10e5_b"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  shard_c_db:
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    restart: "no"
+    environment:
+      POSTGRES_USER: bank
+      POSTGRES_DB: b10e5_c
+      POSTGRES_PASSWORD: ${LAB_C_PASSWORD:?Set LAB_C_PASSWORD}
+    volumes: [c_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank -d b10e5_c"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  shard_a_init:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      PGHOST: shard_a_db
+      PGDATABASE: b10e5_a
+      PGUSER: bank
+      PGPASSWORD: ${LAB_A_PASSWORD:?Set LAB_A_PASSWORD}
+    volumes:
+      - ./database/shard_a.sql:/bootstrap/shard.sql:ro
+    command: ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", "/bootstrap/shard.sql"]
+    depends_on:
+      shard_a_db: {condition: service_healthy}
+  shard_b_init:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      PGHOST: shard_b_db
+      PGDATABASE: b10e5_b
+      PGUSER: bank
+      PGPASSWORD: ${LAB_B_PASSWORD:?Set LAB_B_PASSWORD}
+    volumes:
+      - ./database/shard_b.sql:/bootstrap/shard.sql:ro
+      - ./database/bonus10e2_migration_capture.sql:/bootstrap/capture.sql:ro
+      - ./database/bonus10e4c2_physical_owner_guard.sql:/bootstrap/physical.sql:ro
+      - ./scripts/init_b.sh:/bootstrap/init_b.sh:ro
+    command: ["sh", "/bootstrap/init_b.sh"]
+    depends_on:
+      shard_b_db: {condition: service_healthy}
+  shard_c_init:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      PGHOST: shard_c_db
+      PGDATABASE: b10e5_c
+      PGUSER: bank
+      PGPASSWORD: ${LAB_C_PASSWORD:?Set LAB_C_PASSWORD}
+    volumes:
+      - ./database/shard_c_empty.sql:/bootstrap/shard_c.sql:ro
+      - ./database/bonus10e2_migration_capture.sql:/bootstrap/capture.sql:ro
+      - ./database/bonus10e4c2_physical_owner_guard.sql:/bootstrap/physical.sql:ro
+      - ./database/bonus10e4_target_staging.sql:/bootstrap/staging.sql:ro
+      - ./scripts/init_c.sh:/bootstrap/init_c.sh:ro
+    command: ["sh", "/bootstrap/init_c.sh"]
+    depends_on:
+      shard_c_db: {condition: service_healthy}
+  coordinator_state_init:
+    image: postgres:17-alpine
+    restart: "no"
+    entrypoint: ["sh", "-ec", "chown 10001:10001 /app/state"]
+    volumes: [coordinator_state:/app/state]
+  migration_state_init:
+    image: postgres:17-alpine
+    restart: "no"
+    entrypoint: ["sh", "-ec", "chown 10001:10001 /app/state"]
+    volumes: [migration_state:/app/state]
+
+  bank_a1:
+    <<: *app
+    command: *bank-command
+    environment:
+      <<: *bank-epoch
+      SHARD_ID: A
+      REPLICA_ID: A1
+      BANK_DB_HOST: shard_a_db
+      BANK_DB_NAME: b10e5_a
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${LAB_A_PASSWORD:?Set LAB_A_PASSWORD}
+    depends_on: {shard_a_init: {condition: service_completed_successfully}}
+  bank_a2:
+    <<: *app
+    command: *bank-command
+    environment:
+      <<: *bank-epoch
+      SHARD_ID: A
+      REPLICA_ID: A2
+      BANK_DB_HOST: shard_a_db
+      BANK_DB_NAME: b10e5_a
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${LAB_A_PASSWORD:?Set LAB_A_PASSWORD}
+    depends_on: {shard_a_init: {condition: service_completed_successfully}}
+  bank_b1:
+    <<: *app
+    command: *bank-command
+    environment:
+      <<: *bank-epoch
+      SHARD_ID: B
+      REPLICA_ID: B1
+      BANK_ACCOUNT_FIRST: "1001"
+      BANK_ACCOUNT_LAST: ${LAB_B_LAST:-2000}
+      BANK_DB_HOST: shard_b_db
+      BANK_DB_NAME: b10e5_b
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${LAB_B_PASSWORD:?Set LAB_B_PASSWORD}
+    depends_on: {shard_b_init: {condition: service_completed_successfully}}
+  bank_b2:
+    <<: *app
+    command: *bank-command
+    environment:
+      <<: *bank-epoch
+      SHARD_ID: B
+      REPLICA_ID: B2
+      BANK_ACCOUNT_FIRST: "1001"
+      BANK_ACCOUNT_LAST: ${LAB_B_LAST:-2000}
+      BANK_DB_HOST: shard_b_db
+      BANK_DB_NAME: b10e5_b
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${LAB_B_PASSWORD:?Set LAB_B_PASSWORD}
+    depends_on: {shard_b_init: {condition: service_completed_successfully}}
+  bank_c1:
+    <<: *app
+    profiles: [post]
+    command: *bank-command
+    environment:
+      <<: *bank-epoch
+      BANK_ENABLE_SHARD_C: "1"
+      SHARD_ID: C
+      REPLICA_ID: C1
+      BANK_DB_HOST: shard_c_db
+      BANK_DB_NAME: b10e5_c
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${LAB_C_PASSWORD:?Set LAB_C_PASSWORD}
+    depends_on: {shard_c_init: {condition: service_completed_successfully}}
+  bank_c2:
+    <<: *app
+    profiles: [post]
+    command: *bank-command
+    environment:
+      <<: *bank-epoch
+      BANK_ENABLE_SHARD_C: "1"
+      SHARD_ID: C
+      REPLICA_ID: C2
+      BANK_DB_HOST: shard_c_db
+      BANK_DB_NAME: b10e5_c
+      BANK_DB_USER: bank
+      BANK_DB_PASSWORD: ${LAB_C_PASSWORD:?Set LAB_C_PASSWORD}
+    depends_on: {shard_c_init: {condition: service_completed_successfully}}
+  coordinator:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.coordinator.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *bank-epoch
+      SHARD_MAP_FILE: /app/config/active_map.json
+      COORDINATOR_DB_PATH: /app/state/coordinator.sqlite3
+      COORDINATOR_RECOVERY_INTERVAL: "2"
+    volumes:
+      - ./bank_platform:/app/bank_platform:ro
+      - ./config:/app/config:ro
+      - coordinator_state:/app/state
+    depends_on: {coordinator_state_init: {condition: service_completed_successfully}}
+  gateway:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "bank_platform.gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["127.0.0.1:${LAB_GATEWAY_PORT:-18082}:8000"]
+    environment:
+      <<: *bank-epoch
+      SHARD_MAP_FILE: /app/config/active_map.json
+      COORDINATOR_URL: http://coordinator:8000
+      GATEWAY_HEALTH_INTERVAL: "1"
+    depends_on:
+      bank_a1: {condition: service_healthy}
+      bank_a2: {condition: service_healthy}
+      bank_b1: {condition: service_healthy}
+      bank_b2: {condition: service_healthy}
+      coordinator: {condition: service_healthy}
+  operator:
+    <<: *app
+    profiles: [ops]
+    entrypoint: ["python", "-B", "/app/scripts/lab_operator.py"]
+    command: ["status"]
+    healthcheck: {disable: true}
+    environment:
+      PYTHONPATH: /app
+      LAB_ONLY: "distributed-banking-b10e5-crash"
+      LAB_ROUTING_EPOCH: ${LAB_ROUTING_EPOCH:-1}
+      LAB_A_PASSWORD: ${LAB_A_PASSWORD:?Set LAB_A_PASSWORD}
+      LAB_B_PASSWORD: ${LAB_B_PASSWORD:?Set LAB_B_PASSWORD}
+      LAB_C_PASSWORD: ${LAB_C_PASSWORD:?Set LAB_C_PASSWORD}
+      COORDINATOR_URL: http://coordinator:8000
+      GATEWAY_URL: http://gateway:8000
+    volumes:
+      - ./bank_platform:/app/bank_platform:ro
+      - ./config:/app/config:ro
+      - ./scripts:/app/scripts:ro
+      - migration_state:/app/state
+      - coordinator_state:/app/coord_state:ro
+    depends_on:
+      migration_state_init: {condition: service_completed_successfully}
+
+volumes:
+  a_data:
+  b_data:
+  c_data:
+  coordinator_state:
+  migration_state:

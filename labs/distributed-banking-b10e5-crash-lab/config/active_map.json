@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "shards": [
+    {"id": "A", "first": "A0001", "last": "A1000", "replicas": ["http://bank_a1:8000", "http://bank_a2:8000"]},
+    {"id": "B", "first": "A1001", "last": "A2000", "replicas": ["http://bank_b1:8000", "http://bank_b2:8000"]}
+  ]
+}
