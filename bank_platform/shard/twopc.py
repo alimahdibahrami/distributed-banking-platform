@@ -26,7 +26,7 @@ def normalize_txid(txid: str) -> str:
 
 def prepared_gid(txid: str, shard: str) -> str:
     txid = normalize_txid(txid)
-    if shard not in ('A', 'B'):
+    if shard not in ('A', 'B', 'C'):
         raise ValueError('Unexpected shard')
     return 'bank_' + txid.replace('-', '') + '_' + shard.lower()
 

@@ -36,11 +36,24 @@ class ShardIdentityError(RuntimeError):
 
 class PostgresAccountStore:
     def __init__(self, shard_id: str, config: DbConfig | None = None):
-        if shard_id not in {"A", "B"}:
+        if shard_id not in {"A", "B", "C"}:
             raise ValueError("Unknown shard")
         self.shard_id = shard_id
         self.config = config or DbConfig.from_env()
-        self.first, self.last = (1, 1000) if shard_id == "A" else (1001, 2000)
+        defaults = {"A": (1, 1000), "B": (1001, 2000), "C": (1501, 2000)}
+        first, last = defaults[shard_id]
+        # B's new 1001..1500 identity is only valid after a controlled DB
+        # migration; an environment override alone never alters DB ownership.
+        self.first = int(os.getenv("BANK_ACCOUNT_FIRST", str(first)))
+        self.last = int(os.getenv("BANK_ACCOUNT_LAST", str(last)))
+        if (self.first, self.last) not in {(1, 1000), (1001, 2000), (1001, 1500), (1501, 2000)}:
+            raise ValueError("Unexpected shard range")
+        if shard_id == "A" and (self.first, self.last) != (1, 1000):
+            raise ValueError("Invalid shard A range")
+        if shard_id == "B" and (self.first, self.last) not in {(1001, 2000), (1001, 1500)}:
+            raise ValueError("Invalid shard B range")
+        if shard_id == "C" and (self.first, self.last) != (1501, 2000):
+            raise ValueError("Invalid shard C range")
 
     def owns(self, account_id: str) -> bool:
         number = account_number(account_id)

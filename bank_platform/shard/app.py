@@ -23,8 +23,10 @@ def create_app(
 ) -> FastAPI:
     shard = shard_id or os.getenv("SHARD_ID")
     replica = replica_id or os.getenv("REPLICA_ID")
-    if shard not in ("A", "B") or replica not in (f"{shard}1", f"{shard}2"):
-        raise ValueError("Expected SHARD_ID=A/B and matching REPLICA_ID=A1/A2/B1/B2")
+    if shard not in ("A", "B", "C") or replica not in (f"{shard}1", f"{shard}2"):
+        raise ValueError("Expected A/B/C shard and matching replica")
+    if shard == "C" and os.getenv("BANK_ENABLE_SHARD_C", "0") != "1":
+        raise ValueError("Shard C must be explicitly enabled in an isolated deployment")
     storage = store if store is not None else PostgresAccountStore(shard)
     app = FastAPI(title=f"Bank Replica {replica}", version="0.4.0")
     app.state.store = storage

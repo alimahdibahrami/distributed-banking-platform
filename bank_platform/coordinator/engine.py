@@ -22,6 +22,13 @@ LOGGER = logging.getLogger('uvicorn.error')
 
 
 class DecisionJournal:
+    """Crash-safe decisions with immutable participant and map-epoch snapshot.
+
+    Keep the legacy a_ack/b_ack columns to preserve old on-disk journal data.
+    New transactions always store the exact participants in the same SQLite
+    commit as the NEW record; a map update cannot redirect a prior decision.
+    """
+
     def __init__(self, path: str):
         self.path = path
 
@@ -48,9 +55,20 @@ class DecisionJournal:
                 reason TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )''')
+            # Migration is additive; never drop or modify old transfer data.
+            columns = {r['name'] for r in con.execute('PRAGMA table_info(transactions)')}
+            if 'owner_epoch' not in columns:
+                con.execute('ALTER TABLE transactions ADD COLUMN owner_epoch INTEGER NOT NULL DEFAULT 1')
+            con.execute('''CREATE TABLE IF NOT EXISTS transaction_participants (
+                transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id),
+                shard TEXT NOT NULL CHECK (shard IN ('A','B','C')),
+                account TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('debit','credit')),
+                epoch INTEGER NOT NULL CHECK (epoch > 0),
+                ack INTEGER NOT NULL DEFAULT 0 CHECK (ack IN (0,1)),
+                PRIMARY KEY(transaction_id, shard)
+            )''')
 
     def incomplete(self, *, stale_new: bool = False, limit: int = 100) -> list[dict]:
-        """Snapshot only durable, incomplete work (bounded per watchdog pass)."""
         states = "state IN ('NEW', 'COMMIT', 'ABORT')" if stale_new else "state IN ('COMMIT', 'ABORT')"
         age = " AND (state != 'NEW' OR created_at <= datetime('now', '-60 seconds'))" if stale_new else ''
         with self._connect() as con:
@@ -69,9 +87,38 @@ class DecisionJournal:
             row = con.execute('SELECT * FROM transactions WHERE transaction_id=?', (transaction_id,)).fetchone()
             return dict(row) if row is not None else None
 
-    def create(self, txid: str, source: str, destination: str, amount: int) -> bool:
+    def participants(self, txid: str) -> list[dict]:
         with self._connect() as con:
-            result = con.execute('INSERT OR IGNORE INTO transactions (transaction_id,source,destination,amount,state) VALUES (?,?,?,?,?)', (txid, source, destination, amount, 'NEW'))
+            rows = [dict(r) for r in con.execute(
+                'SELECT shard, account, role, epoch, ack FROM transaction_participants WHERE transaction_id=? ORDER BY shard',
+                (txid,)
+            )]
+            if rows:
+                return rows
+            # Old SQLite journals had precisely A/B as their decision targets.
+            row = con.execute('SELECT source,destination,a_ack,b_ack FROM transactions WHERE transaction_id=?', (txid,)).fetchone()
+            if row is None:
+                return []
+            return [{'shard': 'A', 'account': row['source'], 'role': 'legacy', 'epoch': 1, 'ack': row['a_ack']},
+                    {'shard': 'B', 'account': row['destination'], 'role': 'legacy', 'epoch': 1, 'ack': row['b_ack']}]
+
+    def create(self, txid: str, source: str, destination: str, amount: int,
+               *, legs: tuple[tuple[str, str, str], ...] | None = None,
+               epoch: int = 1) -> bool:
+        if type(epoch) is not int or epoch < 1:
+            raise ValueError('Invalid owner epoch')
+        if legs is not None and (len(legs) != 2 or
+                                 len({leg[0] for leg in legs}) != 2 or
+                                 any(leg[0] not in ('A', 'B', 'C') or leg[2] not in ('debit', 'credit') for leg in legs)):
+            raise ValueError('A 2PC transfer requires two distinct participant shards')
+        with self._connect() as con:
+            result = con.execute(
+                'INSERT OR IGNORE INTO transactions (transaction_id,source,destination,amount,state,owner_epoch) VALUES (?,?,?,?,?,?)',
+                (txid, source, destination, amount, 'NEW', epoch))
+            if result.rowcount == 1 and legs is not None:
+                con.executemany('''INSERT INTO transaction_participants
+                    (transaction_id,shard,account,role,epoch) VALUES (?,?,?,?,?)''',
+                    [(txid, shard, account, role, epoch) for shard, account, role in legs])
             return result.rowcount == 1
 
     def decide(self, txid: str, decision: str, reason: str = ''):
@@ -80,18 +127,32 @@ class DecisionJournal:
             result = con.execute("UPDATE transactions SET state=?, reason=? WHERE transaction_id=? AND state='NEW'", (decision, reason, txid))
             if result.rowcount != 1:
                 raise RuntimeError('Decision already recorded; cannot overwrite durable 2PC decision')
-        # Connection context COMMIT + synchronous=FULL before any phase-2 notification.
+        # SQLite commit + synchronous=FULL precedes notification to participants.
 
     def acknowledge(self, txid: str, shard: str):
-        column = 'a_ack' if shard == 'A' else 'b_ack'
+        if shard not in ('A', 'B', 'C'):
+            raise ValueError('Unexpected shard acknowledgment')
         with self._connect() as con:
-            con.execute(f'UPDATE transactions SET {column}=1 WHERE transaction_id=?', (txid,))
-            row = con.execute('SELECT state,a_ack,b_ack FROM transactions WHERE transaction_id=?', (txid,)).fetchone()
-            if row and row['a_ack'] and row['b_ack']:
-                if row['state'] == 'COMMIT':
-                    con.execute("UPDATE transactions SET state='DONE' WHERE transaction_id=?", (txid,))
-                elif row['state'] == 'ABORT':
-                    con.execute("UPDATE transactions SET state='ABORTED' WHERE transaction_id=?", (txid,))
+            count = con.execute('SELECT count(*) FROM transaction_participants WHERE transaction_id=?', (txid,)).fetchone()[0]
+            if count:
+                changed = con.execute('UPDATE transaction_participants SET ack=1 WHERE transaction_id=? AND shard=?',
+                                      (txid, shard))
+                if changed.rowcount != 1:
+                    raise ValueError('Cannot acknowledge a nonparticipant')
+                # Historical status readers retain the original A/B columns.
+                if shard in ('A', 'B'):
+                    con.execute(f'UPDATE transactions SET {shard.lower()}_ack=1 WHERE transaction_id=?', (txid,))
+                unacked = con.execute('SELECT count(*) FROM transaction_participants WHERE transaction_id=? AND ack=0',
+                                      (txid,)).fetchone()[0]
+                done = unacked == 0
+            else:
+                if shard == 'C':
+                    raise ValueError('Legacy journal cannot contain shard C')
+                con.execute(f'UPDATE transactions SET {shard.lower()}_ack=1 WHERE transaction_id=?', (txid,))
+                row = con.execute('SELECT a_ack,b_ack FROM transactions WHERE transaction_id=?', (txid,)).fetchone()
+                done = bool(row and row['a_ack'] and row['b_ack'])
+            if done:
+                con.execute("UPDATE transactions SET state=CASE WHEN state='COMMIT' THEN 'DONE' WHEN state='ABORT' THEN 'ABORTED' ELSE state END WHERE transaction_id=?", (txid,))
 
 
 class CoordinatorEngine:
@@ -182,8 +243,9 @@ class CoordinatorEngine:
         if row['state'] not in ('COMMIT', 'ABORT'):
             return row
         # Outcomes are safe to repeat: COMMIT PREPARED has durable receipt.
-        for shard in ('A', 'B'):
-            if row[shard.lower() + '_ack']:
+        for participant in self.journal.participants(txid):
+            shard = participant['shard']
+            if participant['ack']:
                 continue
             response = await self._participant(shard, 'POST', '/internal/tpc/decision', {
                 'transaction_id': txid, 'decision': row['state'],
@@ -196,14 +258,15 @@ class CoordinatorEngine:
                 LOGGER.warning('coordinator.pending txid=%s shard=%s decision=%s', txid, shard, row['state'])
         return self.journal.get(txid)
 
-    @staticmethod
-    def public_state(row: dict) -> dict:
+    def public_state(self, row: dict) -> dict:
         state = row['state']
+        participants = self.journal.participants(row['transaction_id'])
         return {
             'transaction_id': row['transaction_id'],
             'status': 'COMMITTED' if state == 'DONE' else 'ABORTED' if state == 'ABORTED' else 'PENDING',
             'decision': 'COMMIT' if state in ('COMMIT', 'DONE') else 'ABORT' if state in ('ABORT', 'ABORTED') else 'UNKNOWN',
-            'acknowledged_shards': [s for s in ('A', 'B') if row[s.lower() + '_ack']],
+            'acknowledged_shards': [p['shard'] for p in participants if p['ack']],
+            'owner_epoch': row['owner_epoch'],
             'reason': row['reason'],
         }
 
@@ -217,15 +280,17 @@ class CoordinatorEngine:
         if source_owner == target_owner:
             raise BankingError('SAME_SHARD', 'Coordinator accepts cross-shard transfers only', 400)
         async with self._locks.setdefault(txid, asyncio.Lock()):
-            newly_created = self.journal.create(txid, command.source, command.destination, command.amount)
+            legs = tuple(sorted(((source_owner, command.source, 'debit'),
+                                 (target_owner, command.destination, 'credit'))))
+            newly_created = self.journal.create(
+                txid, command.source, command.destination, command.amount,
+                legs=legs, epoch=self.mapping.version)
             record = self.journal.get(txid)
             if (record['source'], record['destination'], record['amount']) != (command.source, command.destination, command.amount):
                 raise BankingError('TRANSACTION_ID_CONFLICT', 'Transaction ID belongs to a different transfer', 409)
             if newly_created:
                 # Consistent A->B prepare order prevents opposite-direction
                 # transfers acquiring shard locks in a cyclic order.
-                legs = sorted(((source_owner, command.source, 'debit'),
-                               (target_owner, command.destination, 'credit')))
                 yes, reason = True, ''
                 for index, (owner, account, role) in enumerate(legs):
                     yes, reason = await self._prepare(owner, txid, account, role, command.amount)

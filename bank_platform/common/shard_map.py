@@ -1,4 +1,9 @@
-"""Deterministic account ownership used by the Gateway before replica selection."""
+"""Validated account ownership map.
+
+Version 1 remains the immutable two-shard assignment baseline. Version 2+
+may express the *post-cutover* A/B/C ranges, but publishing a JSON file is
+NOT an online cutover: a durable shard-level epoch fence is required first.
+"""
 from __future__ import annotations
 
 import json
@@ -47,8 +52,8 @@ def load_shard_map(path: str | Path) -> ShardMap:
     if type(raw) is not dict or type(raw.get("version")) is not int or raw["version"] < 1:
         raise ValueError("Shard Map must have a positive integer version")
     items = raw.get("shards")
-    if not isinstance(items, list) or len(items) != 2:
-        raise ValueError("The mandatory baseline must define exactly two shards")
+    if not isinstance(items, list) or len(items) not in (2, 3):
+        raise ValueError("Shard Map must contain two or three shards")
     shards: list[Shard] = []
     for item in items:
         if not isinstance(item, dict):
@@ -63,17 +68,28 @@ def load_shard_map(path: str | Path) -> ShardMap:
         if len(replicas) != len(set(replicas)):
             raise ValueError("Shard has duplicate replica endpoints")
         name = item.get("id")
-        if name not in ("A", "B"):
+        if name not in ("A", "B", "C"):
             raise ValueError("Unexpected shard ID")
         shards.append(Shard(name, first, last, tuple(replicas)))
-    if {s.name for s in shards} != {"A", "B"}:
-        raise ValueError("Expected unique shards A and B")
-    ordered = sorted(shards, key=lambda s: s.first)
-    if ordered[0].first != 1 or ordered[0].last != 1000 or ordered[0].name != "A":
-        raise ValueError("Shard A must own A0001..A1000")
-    if ordered[1].first != 1001 or ordered[1].last != 2000 or ordered[1].name != "B":
-        raise ValueError("Shard B must own A1001..A2000")
-    endpoints = [replica for s in shards for replica in s.replicas]
+    ordered = tuple(sorted(shards, key=lambda s: s.first))
+    # No holes, overlaps, duplicate IDs or duplicate replicas are legal.
+    if len({s.name for s in ordered}) != len(ordered):
+        raise ValueError("Duplicate shard ID")
+    if ordered[0].first != 1 or ordered[-1].last != 2000:
+        raise ValueError("Map must cover A0001..A2000")
+    if any(left.last + 1 != right.first for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("Shard B or C ranges must have no gaps or overlaps")
+    endpoints = [replica for s in ordered for replica in s.replicas]
     if len(endpoints) != len(set(endpoints)):
         raise ValueError("Replicas may not belong to multiple shards")
-    return ShardMap(raw["version"], tuple(ordered))
+    if len(ordered) == 2:
+        expected = (("A", 1, 1000), ("B", 1001, 2000))
+        if tuple((s.name, s.first, s.last) for s in ordered) != expected:
+            raise ValueError("Baseline must retain A0001..A1000 / A1001..A2000")
+    else:
+        expected = (("A", 1, 1000), ("B", 1001, 1500), ("C", 1501, 2000))
+        if raw["version"] < 2:
+            raise ValueError("Three-shard map requires epoch/version >=2")
+        if tuple((s.name, s.first, s.last) for s in ordered) != expected:
+            raise ValueError("Three-shard map must move A1501..A2000 from B to C")
+    return ShardMap(raw["version"], ordered)
