@@ -1,0 +1,21 @@
+[Unit]
+Description=Custom Distributed Banking Replica Self-Healing Controller
+After=docker.service
+Requires=docker.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/distributed-banking-platform
+ExecStart=/usr/bin/python3 /opt/distributed-banking-platform/scripts/self_healing_controller.py --project-dir /opt/distributed-banking-platform --state-file /var/lib/distributed-banking-selfheal/state.json --interval 5 --failures 2 --cooldown 50
+User=root
+Group=root
+Restart=on-failure
+RestartSec=8
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
