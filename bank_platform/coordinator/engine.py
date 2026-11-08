@@ -17,7 +17,8 @@ import httpx
 from bank_platform.common.shard_map import ShardMap
 from bank_platform.common.validation import BankingError, validate_transfer
 from bank_platform.shard.twopc import normalize_txid
-from bank_platform.migration.epoch import outgoing_epoch
+from bank_platform.migration.epoch import outgoing_epoch, strip_internal_epoch
+from bank_platform.migration.routing_guard import strict_routing
 
 LOGGER = logging.getLogger('uvicorn.error')
 
@@ -274,7 +275,16 @@ class CoordinatorEngine:
         }
 
     async def transfer(self, body: dict) -> tuple[int, dict]:
-        command = validate_transfer(body)
+        clean_body, claimed_epoch = strip_internal_epoch(body)
+        command = validate_transfer(clean_body)
+        # Do not allow an old Gateway to create a 2PC transaction after the
+        # Coordinator switched maps. Old journal decisions remain recoverable
+        # via the status endpoint and immutable participant entries.
+        if ((strict_routing() and claimed_epoch != self.mapping.version)
+                or (claimed_epoch is not None and claimed_epoch != self.mapping.version)):
+            raise BankingError('ROUTING_EPOCH_MISMATCH',
+                               'Gateway and Coordinator routing epochs disagree', 409)
+        body = clean_body
         if 'transaction_id' not in body:
             raise BankingError('INVALID_REQUEST', 'transaction_id required at coordinator', 400)
         txid = normalize_txid(body['transaction_id'])
